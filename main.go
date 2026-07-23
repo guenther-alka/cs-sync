@@ -140,7 +140,7 @@ func runCmd(args []string, apply_ bool) {
 			log.Printf("ERROR scanning secondary: %v", err)
 			return
 		}
-		populateACL(primaryTree, primaryPath2, acltype, log)
+		rootACL := populateACL(primaryTree, primaryPath2, acltype, log)
 
 		if *mode == "oneway" {
 			forceOneway(&st.Baseline, primaryTree, secondaryTree)
@@ -159,11 +159,19 @@ func runCmd(args []string, apply_ bool) {
 			if err := state.Save(primaryPath2, newState); err != nil {
 				log.Printf("ERROR saving state: %v", err)
 			}
-			if err := state.WriteACLCSV(primaryPath2, res.NewBaseline, acltype); err != nil {
+			if err := state.WriteACLCSV(primaryPath2, res.NewBaseline, acltype, rootACL); err != nil {
 				log.Printf("ERROR writing acl.csv: %v", err)
 			}
 			if err := state.MirrorACLCSV(primaryPath2, secondaryPath2); err != nil {
 				log.Printf("ERROR mirroring acl.csv: %v", err)
+			}
+			// root folder ACL (e.g. tank/data itself) is the inheritance
+			// default for new top-level entries -- keep secondary's root
+			// ACL in sync with primary's, same as every other folder.
+			if rootACL != "" {
+				if err := acl.Apply(secondaryPath2, acltype, rootACL); err != nil {
+					log.Printf("WARN: could not apply root ACL to secondary: %v", err)
+				}
 			}
 		} else {
 			for _, op := range res.Ops {
@@ -190,6 +198,7 @@ func runCmd(args []string, apply_ bool) {
 	for reason := range w.Changed() {
 		doPass(reason)
 	}
+	}
 }
 
 // forceOneway implements --mode oneway (section 11: the whole-mirror mode
@@ -197,7 +206,6 @@ func runCmd(args []string, apply_ bool) {
 // the operator simply passes the replicated folder as --primary and the
 // empty target as --secondary; "oneway" always means "--primary is the
 // source, --secondary is the mirror" (Gea decision 2026.07.23: primary ->
-// secondary is the intuitive default direction). Implementation: pin the
 // secondary is the intuitive default direction). Implementation: pin the
 // baseline to the CURRENT secondary tree, so the three-way merge only
 // ever sees "secondary is unchanged" and propagates every primary
@@ -251,19 +259,30 @@ func bootstrapACL(primaryPath2, secondaryPath2, acltype string, log *logging.Log
 		return nil // Fall 1
 	}
 
-	// Fall 2/3: restore onto primary's existing folders first.
+	// Fall 2/3: restore onto primary's existing folders first, including
+	// the root itself (key "."), the default inheritance source for any
+	// new top-level file/folder (e.g. tank/data's own ACL).
 	for relpath, text := range source {
-		if e, ok := primaryTree[relpath]; !ok || e.Type != model.TypeDir {
-			continue // defensive; chooseACLSource already validated this
+		full := primaryPath2
+		if relpath != "." {
+			if e, ok := primaryTree[relpath]; !ok || e.Type != model.TypeDir {
+				continue // defensive; chooseACLSource already validated this
+			}
+			full = filepath.Join(primaryPath2, filepath.FromSlash(relpath))
 		}
-		full := filepath.Join(primaryPath2, filepath.FromSlash(relpath))
 		if err := acl.Apply(full, acltype, text); err != nil {
 			log.Printf("WARN: ACL bootstrap: could not restore ACL on primary %s: %v (folder keeps default/parent-inherited ACL)", relpath, err)
 		}
 	}
 
 	// Propagate the now-authoritative primary ACL onto EXISTING secondary
-	// folders (new folders are covered by the normal mkdir-time ACL logic).
+	// folders (new folders are covered by the normal mkdir-time ACL logic),
+	// including the secondary root itself.
+	if rootText, ok := source["."]; ok {
+		if err := acl.Apply(secondaryPath2, acltype, rootText); err != nil {
+			log.Printf("WARN: ACL bootstrap: could not push root ACL to secondary: %v (folder keeps default/parent-inherited ACL)", err)
+		}
+	}
 	secondaryTree, err := scanner.Scan(secondaryPath2)
 	if err != nil {
 		log.Printf("WARN: ACL bootstrap: could not scan secondary: %v", err)
@@ -279,6 +298,7 @@ func bootstrapACL(primaryPath2, secondaryPath2, acltype string, log *logging.Log
 		}
 		text, err := acl.Read(filepath.Join(primaryPath2, filepath.FromSlash(relpath)), acltype)
 		if err != nil {
+			log.Printf("WARN: ACL bootstrap: could not read restored primary ACL for %s: %v", relpath, err)
 			log.Printf("WARN: ACL bootstrap: could not read restored primary ACL for %s: %v", relpath, err)
 			continue
 		}
@@ -299,13 +319,15 @@ func chooseACLSource(csvPrimary, csvSecondary map[string]string, primaryTree mod
 	}
 	if len(csvSecondary) > 0 && aclCSVMatches(csvSecondary, primaryTree) {
 		return csvSecondary, "secondary acl.csv (Fall 3: recovery)"
-		return csvSecondary, "secondary acl.csv (Fall 3: recovery)"
 	}
 	return nil, "none -- live scan only (Fall 1: initial setup, or no valid acl.csv found)"
 }
 
 func aclCSVMatches(csv map[string]string, primaryTree model.Tree) bool {
 	for relpath := range csv {
+		if relpath == "." {
+			continue // root always exists (zfscheck already confirmed primary is a real dir); never a Tree entry
+		}
 		e, ok := primaryTree[relpath]
 		if !ok || e.Type != model.TypeDir {
 			return false
@@ -314,7 +336,11 @@ func aclCSVMatches(csv map[string]string, primaryTree model.Tree) bool {
 	return true
 }
 
-func populateACL(tree model.Tree, root, acltype string, log *logging.Logger) {
+// populateACL reads and stores the current folder ACL for every directory
+// in tree (section 6 initial scan behaviour), and returns the ACL of root
+// itself -- root is never a Tree entry (see WriteACLCSV doc comment), so
+// its ACL has to be threaded through separately.
+func populateACL(tree model.Tree, root, acltype string, log *logging.Logger) string {
 	for p, e := range tree {
 		if e.Type != model.TypeDir {
 			continue
@@ -327,11 +353,12 @@ func populateACL(tree model.Tree, root, acltype string, log *logging.Logger) {
 		e.ACL = text
 		tree[p] = e
 	}
-	// root folder itself
-	if text, err := acl.Read(root, acltype); err == nil {
-		e := tree["."]
-		e.ACL = text
+	rootACL, err := acl.Read(root, acltype)
+	if err != nil {
+		log.Printf("WARN: could not read root ACL for %s: %v", root, err)
+		return ""
 	}
+	return rootACL
 }
 
 // applyOrdered runs creates/renames/conflict-renames first (in the ascending

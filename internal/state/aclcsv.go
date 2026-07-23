@@ -11,8 +11,14 @@ import (
 const AclCsvName = "acl.csv"
 
 // WriteACLCSV writes .backupdata/acl.csv: one line per directory,
-// "relpath";"acltype";"acl text" (cs-sync.info section 10).
-func WriteACLCSV(root string, tree model.Tree, acltype string) error {
+// "relpath";"acltype";"acl text" (cs-sync.info section 10). rootACL is
+// the ACL of the sync root itself (e.g. the ZFS dataset mountpoint, like
+// tank/data) -- stored under the special relpath "." since it is never a
+// Tree entry (the root is never created/deleted by cs-sync, only its
+// children are). The root ACL is the default inheritance source for any
+// new top-level file/folder and must be captured/restored just like any
+// other folder's ACL (Gea, 2026.07.23).
+func WriteACLCSV(root string, tree model.Tree, acltype string, rootACL string) error {
 	dir, err := Dir(root)
 	if err != nil {
 		return err
@@ -26,6 +32,13 @@ func WriteACLCSV(root string, tree model.Tree, acltype string) error {
 	}
 	w := csv.NewWriter(f)
 	w.Comma = ';'
+	if rootACL != "" {
+		if err := w.Write([]string{".", acltype, rootACL}); err != nil {
+			f.Close()
+			os.Remove(tmp)
+			return err
+		}
+	}
 	for _, e := range tree {
 		if e.Type != model.TypeDir {
 			continue
