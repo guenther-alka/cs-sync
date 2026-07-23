@@ -198,7 +198,6 @@ func runCmd(args []string, apply_ bool) {
 	for reason := range w.Changed() {
 		doPass(reason)
 	}
-	}
 }
 
 // forceOneway implements --mode oneway (section 11: the whole-mirror mode
@@ -298,7 +297,6 @@ func bootstrapACL(primaryPath2, secondaryPath2, acltype string, log *logging.Log
 		}
 		text, err := acl.Read(filepath.Join(primaryPath2, filepath.FromSlash(relpath)), acltype)
 		if err != nil {
-			log.Printf("WARN: ACL bootstrap: could not read restored primary ACL for %s: %v", relpath, err)
 			log.Printf("WARN: ACL bootstrap: could not read restored primary ACL for %s: %v", relpath, err)
 			continue
 		}
