@@ -2,3 +2,5 @@
 /cs-sync
 /cs-sync.exe
 *.tmp
+.*.ps1
+.testfile.txt
