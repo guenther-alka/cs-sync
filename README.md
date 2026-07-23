@@ -10,7 +10,7 @@ in sync, with RustFS bucket replication carrying `secondary_s3` on to a
 remote site for disaster recovery.
 
 Full concept and design decisions:
-`csweb-gui/data/menues/03_System/02_Services/25_Realtime_Sync/cs-sync.info`
+`/opt/csweb-gui/data/howto.ai/cs-sync.info`
 
 ## Status
 
@@ -25,7 +25,7 @@ comments):
 - FreeBSD `nfs4_setfacl` "replace whole ACL" flag needs verification
   against the target release's man page.
 - Menu integration (`action.pl` under
-  `data/menues/03_System/02_Services/25_Realtime_Sync/`) is not yet built.
+  `data/menues/03_System/02_Services/25_Realtime_Sync/`)
 
 illumos/Solaris use native Event Ports (`port_create`/`port_associate`/
 `port_get` via `golang.org/x/sys/unix`, no cgo) for real event-driven
