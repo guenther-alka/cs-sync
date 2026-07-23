@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -85,25 +86,40 @@ func SetProp(dataset, prop, value string) error {
 
 // CheckAndPrepare implements section 2: read acltype (error+exit on "off"),
 // and set aclinherit=passthrough. Returns the acltype ("posix" or "nfs4").
+//
+// illumos/Solaris SPECIAL CASE (discovered 2026.07.23 on a real OmniOS
+// r151056 host): these platforms have NO "acltype" ZFS property at all --
+// `zfs get acltype` errors with "bad property list: invalid property
+// 'acltype'". This property is a Linux/OpenZFS-on-Linux compatibility
+// toggle (posixacl|nfsv4|off); native illumos/Solaris ZFS has always been
+// NFSv4-ACL-only, with no per-dataset switch and thus no "off" to guard
+// against. So on these platforms cs-sync skips the acltype read entirely
+// and treats every dataset as nfs4 -- confirmed by real default owner@/
+// group@/everyone@ ACEs on the target host (Gea, 2026.07.23).
 func CheckAndPrepare(folderPath string) (string, error) {
 	ds, err := ParentDataset(folderPath)
 	if err != nil {
 		return "", err
 	}
-	acltype, err := GetProp(ds.Name, "acltype")
-	if err != nil {
-		return "", err
+
+	acltype := "nfs4"
+	if runtime.GOOS != "illumos" && runtime.GOOS != "solaris" {
+		raw, err := GetProp(ds.Name, "acltype")
+		if err != nil {
+			return "", err
+		}
+		switch raw {
+		case "off":
+			return "", fmt.Errorf("dataset %s has acltype=off -- cs-sync requires posixacl or nfsv4 (see cs-sync.info section 2)", ds.Name)
+		case "posixacl", "posix":
+			acltype = "posix"
+		case "nfsv4", "nfs4":
+			acltype = "nfs4"
+		default:
+			return "", fmt.Errorf("dataset %s has unexpected acltype=%s", ds.Name, raw)
+		}
 	}
-	switch acltype {
-	case "off":
-		return "", fmt.Errorf("dataset %s has acltype=off -- cs-sync requires posixacl or nfsv4 (see cs-sync.info section 2)", ds.Name)
-	case "posixacl", "posix":
-		acltype = "posix"
-	case "nfsv4", "nfs4":
-		acltype = "nfs4"
-	default:
-		return "", fmt.Errorf("dataset %s has unexpected acltype=%s", ds.Name, acltype)
-	}
+
 	if err := SetProp(ds.Name, "aclinherit", "passthrough"); err != nil {
 		return "", err
 	}
