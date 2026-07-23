@@ -1,0 +1,60 @@
+name: Release
+
+# Builds cs-sync for all target platforms on every tag push (v*), matching
+# the cs-stream release process (see cs-stream.info section 9).
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Cross-compile all platforms
+        run: |
+          set -e
+          VERSION="${GITHUB_REF_NAME}"
+          LDFLAGS="-s -w -X main.version=${VERSION}"
+          mkdir -p dist
+
+          build() {
+            os=$1; arch=$2; goos=$3; goarch=$4; ext=$5
+            outdir="dist/${os}.${arch}"
+            mkdir -p "$outdir"
+            echo "building ${outdir}/cs-sync${ext}"
+            GOOS=$goos GOARCH=$goarch go build -ldflags "$LDFLAGS" \
+              -o "${outdir}/cs-sync${ext}" .
+          }
+
+          build mswin   amd64 windows amd64 .exe
+          build linux   amd64 linux   amd64 ""
+          build linux   arm64 linux   arm64 ""
+          build illumos amd64 illumos amd64 ""
+          build solaris amd64 solaris amd64 ""
+          build freebsd amd64 freebsd amd64 ""
+          build darwin  amd64 darwin  amd64 ""
+          build darwin  arm64 darwin  arm64 ""
+
+      - name: Package per-platform archives
+        run: |
+          cd dist
+          for d in */; do
+            name="${d%/}"
+            tar czf "cs-sync-${name}.tar.gz" "$d"
+          done
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz
