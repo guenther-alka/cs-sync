@@ -8,7 +8,14 @@ import (
 	"github.com/guenther-alka/cs-sync/internal/model"
 )
 
-const AclCsvName = "acl.csv"
+// AclCsvName is namespaced "cs-sync-" to avoid colliding with
+// job-s3backup.pl's worker, which ALSO writes .backupdata/acl.csv (raw
+// `getfacl -R` output, restored via `setfacl --restore`) on the same
+// ZFS filesystem -- discovered 2026.07.23 when Gea asked about
+// compatibility. Different format, different tool; same directory, so
+// the name must differ or the two mechanisms silently clobber each
+// other whenever both run against the same dataset.
+const AclCsvName = "cs-sync-acl.csv"
 
 // WriteACLCSV writes .backupdata/acl.csv: one line per directory,
 // "relpath";"acltype";"acl text" (cs-sync.info section 10). rootACL is
