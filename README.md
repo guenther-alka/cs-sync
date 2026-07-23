@@ -24,10 +24,14 @@ comments):
   as efficient as the concept doc describes.
 - FreeBSD `nfs4_setfacl` "replace whole ACL" flag needs verification
   against the target release's man page.
-- illumos/Solaris have no true kernel event notification backend in this
-  build (fsnotify has no FEN support) -- falls back to polling.
 - Menu integration (`action.pl` under
   `data/menues/03_System/02_Services/25_Realtime_Sync/`) is not yet built.
+
+illumos/Solaris use native Event Ports (`port_create`/`port_associate`/
+`port_get` via `golang.org/x/sys/unix`, no cgo) for real event-driven
+change detection -- not polling. FEN (File Events Notification)
+associations fire once and are re-armed after each event; see
+`internal/watch/watch_eventport_illumossolaris.go`.
 
 ## Build
 
