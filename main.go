@@ -52,7 +52,10 @@ Usage:
   cs-sync version
 
 Options:
-  --mode bidir|oneway     default bidir (oneway: secondary -> primary only)
+  --mode bidir|oneway     default bidir (oneway: --primary is the source,
+                          --secondary is mirrored/overwritten; for the
+                          reverse DR leg, swap which folder you pass as
+                          --primary/--secondary)
   --debounce 500ms        event debounce window (section 7)
   --rescan 24h            safety-net full rescan interval (section 7)
   --max-watched-dirs 0    0=unlimited; FreeBSD recommends 50000 (section 7/14)
@@ -111,9 +114,14 @@ func runCmd(args []string, apply_ bool) {
 	cleanupTmp(secondaryPath2, log)
 
 	roots := apply.Roots{Primary: primaryPath2, Secondary: secondaryPath2, AclType: acltype}
-	// bootstrap ACL source for the rare "secondary filled by replication,
-	// primary empty" case (section 6, first-sync case b)
-	roots.PrimaryBootstrapACL, _ = state.ReadACLCSV(secondaryPath2)
+	if apply_ {
+		// ACL bootstrap (Gea decision 2026.07.23): auto-detect which acl.csv
+		// (if any) is authoritative and restore/propagate it once at
+		// startup. Priority: primary's own acl.csv, else secondary's
+		// (recovery), else none (fresh live scan, folders simply inherit
+		// as they're created). See section 10 "ACL bootstrap priority chain".
+		roots.PrimaryBootstrapACL = bootstrapACL(primaryPath2, secondaryPath2, acltype, log)
+	}
 
 	doPass := func(reason string) {
 		st, err := state.Load(primaryPath2)
@@ -184,17 +192,126 @@ func runCmd(args []string, apply_ bool) {
 	}
 }
 
-// forceOneway drops any baseline/state that would let the reconciler
-// propagate primary -> secondary, implementing --mode oneway (section 11:
-// server2 secondary_s3 -> primary_smb DR leg). Simplest correct approach:
-// treat primary as if it always equals the baseline, so the three-way
-// merge never proposes primary -> secondary ops, only secondary -> primary.
+// forceOneway implements --mode oneway (section 11: the whole-mirror mode
+// used e.g. for the server2 secondary_s3 -> primary_smb DR leg -- there
+// the operator simply passes the replicated folder as --primary and the
+// empty target as --secondary; "oneway" always means "--primary is the
+// source, --secondary is the mirror" (Gea decision 2026.07.23: primary ->
+// secondary is the intuitive default direction). Implementation: pin the
+// secondary is the intuitive default direction). Implementation: pin the
+// baseline to the CURRENT secondary tree, so the three-way merge only
+// ever sees "secondary is unchanged" and propagates every primary
+// create/update/delete onto secondary, while any secondary-only changes
+// are simply overwritten or removed (full mirror, never fed back).
 func forceOneway(baseline *model.Tree, primaryTree, secondaryTree model.Tree) {
 	nb := model.Tree{}
-	for p, e := range primaryTree {
+	for p, e := range secondaryTree {
 		nb[p] = e
 	}
 	*baseline = nb
+}
+
+// bootstrapACL implements the ACL source priority chain (Gea decision
+// 2026.07.23, cs-sync.info section 10):
+//
+//	Fall 1 (initial setup): neither side has acl.csv yet -> nothing to
+//	  restore, folders simply get parent-inherited ACL as cs-sync
+//	  creates them during the normal reconcile pass that follows.
+//	Fall 2 (restart/restore): primary/.backupdata/acl.csv exists and
+//	  matches primary's current folder structure -> restore it onto
+//	  primary's existing folders, then propagate onto secondary.
+//	Fall 3 (recovery): primary has no (matching) acl.csv, but
+//	  secondary's does match primary's current folder structure (e.g.
+//	  primary was freshly restored/replicated) -> same restore+
+//	  propagate, sourced from secondary's copy instead.
+//
+// "Matches" is all-or-nothing: every path listed in a candidate acl.csv
+// must exist as a directory in primary's current tree, or the whole
+// candidate is discarded (never partially applied). Any apply failure
+// for an individual folder is logged and otherwise ignored -- that
+// folder simply keeps whatever default/parent-inherited ACL it already
+// has, per Gea's explicit instruction; this bootstrap step must not fail
+// the whole startup over one folder's ACL.
+//
+// Returns the chosen source map (or nil if none matched), which is also
+// kept as apply.Roots.PrimaryBootstrapACL so folders created LATER
+// during ongoing operation (e.g. more data still arriving via RustFS
+// replication) can keep drawing on the same source.
+func bootstrapACL(primaryPath2, secondaryPath2, acltype string, log *logging.Logger) map[string]string {
+	primaryTree, err := scanner.Scan(primaryPath2)
+	if err != nil {
+		log.Printf("WARN: ACL bootstrap: could not scan primary: %v", err)
+		return nil
+	}
+	csvPrimary, _ := state.ReadACLCSV(primaryPath2)
+	csvSecondary, _ := state.ReadACLCSV(secondaryPath2)
+	source, sourceName := chooseACLSource(csvPrimary, csvSecondary, primaryTree)
+	log.Printf("ACL bootstrap: source=%s", sourceName)
+	if source == nil {
+		return nil // Fall 1
+	}
+
+	// Fall 2/3: restore onto primary's existing folders first.
+	for relpath, text := range source {
+		if e, ok := primaryTree[relpath]; !ok || e.Type != model.TypeDir {
+			continue // defensive; chooseACLSource already validated this
+		}
+		full := filepath.Join(primaryPath2, filepath.FromSlash(relpath))
+		if err := acl.Apply(full, acltype, text); err != nil {
+			log.Printf("WARN: ACL bootstrap: could not restore ACL on primary %s: %v (folder keeps default/parent-inherited ACL)", relpath, err)
+		}
+	}
+
+	// Propagate the now-authoritative primary ACL onto EXISTING secondary
+	// folders (new folders are covered by the normal mkdir-time ACL logic).
+	secondaryTree, err := scanner.Scan(secondaryPath2)
+	if err != nil {
+		log.Printf("WARN: ACL bootstrap: could not scan secondary: %v", err)
+		return source
+	}
+	for relpath, se := range secondaryTree {
+		if se.Type != model.TypeDir {
+			continue
+		}
+		pe, ok := primaryTree[relpath]
+		if !ok || pe.Type != model.TypeDir {
+			continue // only on secondary -- normal reconcile creates/removes it
+		}
+		text, err := acl.Read(filepath.Join(primaryPath2, filepath.FromSlash(relpath)), acltype)
+		if err != nil {
+			log.Printf("WARN: ACL bootstrap: could not read restored primary ACL for %s: %v", relpath, err)
+			continue
+		}
+		full := filepath.Join(secondaryPath2, filepath.FromSlash(relpath))
+		if err := acl.Apply(full, acltype, text); err != nil {
+			log.Printf("WARN: ACL bootstrap: could not push ACL to secondary %s: %v (folder keeps default/parent-inherited ACL)", relpath, err)
+		}
+	}
+	return source
+}
+
+// chooseACLSource picks primary's own acl.csv if valid, else secondary's,
+// else none. "Valid" = every listed path exists as a directory in
+// primaryTree (all-or-nothing, see bootstrapACL doc comment).
+func chooseACLSource(csvPrimary, csvSecondary map[string]string, primaryTree model.Tree) (map[string]string, string) {
+	if len(csvPrimary) > 0 && aclCSVMatches(csvPrimary, primaryTree) {
+		return csvPrimary, "primary acl.csv (Fall 2: restart/restore)"
+	}
+	if len(csvSecondary) > 0 && aclCSVMatches(csvSecondary, primaryTree) {
+		return csvSecondary, "secondary acl.csv (Fall 3: recovery)"
+		return csvSecondary, "secondary acl.csv (Fall 3: recovery)"
+	}
+	return nil, "none -- live scan only (Fall 1: initial setup, or no valid acl.csv found)"
+}
+
+func aclCSVMatches(csv map[string]string, primaryTree model.Tree) bool {
+	for relpath := range csv {
+		e, ok := primaryTree[relpath]
+		if !ok || e.Type != model.TypeDir {
+			return false
+		}
+	}
+	return true
 }
 
 func populateACL(tree model.Tree, root, acltype string, log *logging.Logger) {

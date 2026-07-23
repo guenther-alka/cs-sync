@@ -58,6 +58,16 @@ cs-sync scan --primary <path> --secondary <path>   # dry-run report
 cs-sync version
 ```
 
+`--mode oneway`: `--primary` is always the source, `--secondary` is the
+mirror (overwritten/deleted to match). For the reverse DR leg, swap
+which folder you pass as `--primary`/`--secondary`.
+
+ACL bootstrap (no CLI flag): on every `run` startup, cs-sync auto-detects
+which `acl.csv` (if any) is authoritative -- primary's own copy, else
+secondary's (recovery case), else none (fresh live scan) -- and restores/
+propagates it once before the normal reconcile loop starts. See
+cs-sync.info section 10.
+
 See cs-sync.info for the full CLI option list, ACL preconditions (ZFS
 acltype must be posix or nfs4, not off), and the site-replication
 topology this is designed to slot into.
