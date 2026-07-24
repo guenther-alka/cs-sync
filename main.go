@@ -12,9 +12,11 @@ import (
 
 	"github.com/guenther-alka/cs-sync/internal/acl"
 	"github.com/guenther-alka/cs-sync/internal/apply"
+	"github.com/guenther-alka/cs-sync/internal/guard"
 	"github.com/guenther-alka/cs-sync/internal/logging"
 	"github.com/guenther-alka/cs-sync/internal/model"
 	"github.com/guenther-alka/cs-sync/internal/reconcile"
+	"github.com/guenther-alka/cs-sync/internal/remote"
 	"github.com/guenther-alka/cs-sync/internal/scanner"
 	"github.com/guenther-alka/cs-sync/internal/state"
 	"github.com/guenther-alka/cs-sync/internal/watch"
@@ -35,6 +37,8 @@ func main() {
 		fmt.Println("cs-sync " + version)
 	case "run":
 		runCmd(os.Args[2:], true)
+	case "serve":
+		serveCmd(os.Args[2:])
 	case "scan":
 		runCmd(os.Args[2:], false)
 	default:
@@ -47,8 +51,9 @@ func usage() {
 	fmt.Println(`cs-sync -- realtime bidirectional folder sync (see cs-sync.info)
 
 Usage:
-  cs-sync run  --primary <path> --secondary <path> [options]
+  cs-sync run  --primary <path> [--secondary <path>] [--remote host:port] [options]
   cs-sync scan --primary <path> --secondary <path> [options]   (dry-run report)
+  cs-sync serve --dest <path> --listen 127.0.0.1:9010          (2.0 receiver)
   cs-sync version
 
 Options:
@@ -59,7 +64,22 @@ Options:
   --debounce 500ms        event debounce window (section 7)
   --rescan 24h            safety-net full rescan interval (section 7)
   --max-watched-dirs 0    0=unlimited; FreeBSD recommends 50000 (section 7/14)
-  --log <file>            default <primary>/.backupdata/cs-sync.log`)
+  --log <file>            default <primary>/.backupdata/cs-sync.log
+
+2.0 remote options (cs-sync-2.0-design.info; --remote is ALWAYS one-way
+primary -> remote and can be combined with a local --secondary pair):
+  --remote host:port      receiver address (typically a local cs-stream
+                          tunnel-send endpoint -- cs-sync does not encrypt)
+  --remote-name <id>      state dir name (default: address, sanitized)
+  --bwlimit <bytes/s>     rate limit remote transfers, 0=unlimited
+  --max-delete-count 1000 delete-budget guard (section 5b), 0=off
+  --max-delete-percent 20 delete-budget guard, 0=off
+
+serve options:
+  --dest <path>           destination folder on ZFS (required)
+  --listen <addr>         default 127.0.0.1:9010 (loopback; put a
+                          cs-stream tunnel-listen in front for encryption)
+  --log <file>            default <dest>/.backupdata/cs-sync.log`)
 }
 
 func runCmd(args []string, apply_ bool) {
@@ -71,14 +91,30 @@ func runCmd(args []string, apply_ bool) {
 	rescan := fs.Duration("rescan", 24*time.Hour, "safety-net rescan interval")
 	maxWatched := fs.Int("max-watched-dirs", 0, "0=unlimited; FreeBSD suggested 50000")
 	logPath := fs.String("log", "", "log file path")
+	remoteAddr := fs.String("remote", "", "2.0: receiver host:port (one-way primary -> remote)")
+	remoteName := fs.String("remote-name", "", "2.0: per-pair state dir name")
+	bwlimit := fs.Int64("bwlimit", 0, "2.0: remote rate limit bytes/s, 0=unlimited")
+	maxDelCount := fs.Int("max-delete-count", 1000, "2.0: delete-budget guard, 0=off")
+	maxDelPercent := fs.Int("max-delete-percent", 20, "2.0: delete-budget guard, 0=off")
 	fs.Parse(args)
 
-	if *primaryPath == "" || *secondaryPath == "" {
-		fmt.Fprintln(os.Stderr, "error: --primary and --secondary are required")
+	if *primaryPath == "" {
+		fmt.Fprintln(os.Stderr, "error: --primary is required")
+		os.Exit(2)
+	}
+	if *secondaryPath == "" && *remoteAddr == "" {
+		fmt.Fprintln(os.Stderr, "error: at least one of --secondary or --remote is required")
+		os.Exit(2)
+	}
+	if !apply_ && *secondaryPath == "" {
+		fmt.Fprintln(os.Stderr, "error: scan needs --secondary")
 		os.Exit(2)
 	}
 	primaryPath2, _ := filepath.Abs(*primaryPath)
-	secondaryPath2, _ := filepath.Abs(*secondaryPath)
+	secondaryPath2 := ""
+	if *secondaryPath != "" {
+		secondaryPath2, _ = filepath.Abs(*secondaryPath)
+	}
 
 	if *logPath == "" {
 		if d, err := state.Dir(primaryPath2); err == nil {
@@ -98,23 +134,59 @@ func runCmd(args []string, apply_ bool) {
 		log.Printf("FATAL: primary precondition check failed: %v", err)
 		os.Exit(1)
 	}
-	acltypeS, err := zfscheck.CheckAndPrepare(secondaryPath2)
-	if err != nil {
-		log.Printf("FATAL: secondary precondition check failed: %v", err)
-		os.Exit(1)
-	}
 	acltype := acltypeP
-	if acltypeP != acltypeS {
-		log.Printf("WARN: acltype differs (primary=%s secondary=%s) -- using primary's acltype as authoritative", acltypeP, acltypeS)
+	if secondaryPath2 != "" {
+		acltypeS, err := zfscheck.CheckAndPrepare(secondaryPath2)
+		if err != nil {
+			log.Printf("FATAL: secondary precondition check failed: %v", err)
+			os.Exit(1)
+		}
+		if acltypeP != acltypeS {
+			log.Printf("WARN: acltype differs (primary=%s secondary=%s) -- using primary's acltype as authoritative", acltypeP, acltypeS)
+		}
 	}
 	log.Printf("acltype=%s (aclinherit=passthrough set on both parent datasets)", acltype)
 
 	// remove leftover crash-safety temp files from a previous run (section 8)
 	cleanupTmp(primaryPath2, log)
-	cleanupTmp(secondaryPath2, log)
+	if secondaryPath2 != "" {
+		cleanupTmp(secondaryPath2, log)
+	}
 
 	roots := apply.Roots{Primary: primaryPath2, Secondary: secondaryPath2, AclType: acltype}
-	if apply_ {
+
+	// 2.0 remote sender (section 12: remote is ALWAYS one-way, can be
+	// combined with a local secondary pair -- topology section 11).
+	var sender *remote.Sender
+	if apply_ && *remoteAddr != "" {
+		name := *remoteName
+		if name == "" {
+			name = sanitizeName(*remoteAddr)
+		}
+		sd, derr := state.Dir(primaryPath2)
+		if derr != nil {
+			log.Printf("FATAL: %v", derr)
+			os.Exit(1)
+		}
+		sender = &remote.Sender{
+			Primary:  primaryPath2,
+			Addr:     *remoteAddr,
+			StateDir: filepath.Join(sd, "remote_"+name),
+			AclType:  acltype,
+			Budget:   guard.Budget{MaxCount: *maxDelCount, MaxPercent: *maxDelPercent},
+			Limiter:  remote.NewLimiter(*bwlimit),
+			Version:  version,
+			Log:      log,
+		}
+		if err := sender.Init(); err != nil {
+			log.Printf("FATAL: remote state init: %v", err)
+			os.Exit(1)
+		}
+		log.Printf("remote leg enabled: %s (state=remote_%s, bwlimit=%d, delete budget count=%d percent=%d)",
+			*remoteAddr, name, *bwlimit, *maxDelCount, *maxDelPercent)
+	}
+
+	if apply_ && secondaryPath2 != "" {
 		// ACL bootstrap (Gea decision 2026.07.23): auto-detect which acl.csv
 		// (if any) is authoritative and restore/propagate it once at
 		// startup. Priority: primary's own acl.csv, else secondary's
@@ -135,12 +207,34 @@ func runCmd(args []string, apply_ bool) {
 			log.Printf("ERROR scanning primary: %v", err)
 			return
 		}
+		rootACL := populateACL(primaryTree, primaryPath2, acltype, log)
+
+		// ---- 2.0 remote leg (independent of the local pair; its own
+		// baseline/queue/retry state, section 15) ----
+		if sender != nil {
+			var csvBlob []byte
+			if d, derr := state.Dir(primaryPath2); derr == nil {
+				csvBlob, _ = os.ReadFile(filepath.Join(d, state.AclCsvName))
+			}
+			sender.Pass(primaryTree, reason, rootACL, csvBlob)
+		}
+		if secondaryPath2 == "" {
+			// remote-only relationship: local pair machinery not in play,
+			// but acl.csv must still be produced for the remote push above
+			// (next pass) -- write it from the primary tree directly.
+			if apply_ {
+				if err := state.WriteACLCSV(primaryPath2, primaryTree, acltype, rootACL); err != nil {
+					log.Printf("ERROR writing acl.csv: %v", err)
+				}
+			}
+			return
+		}
+
 		secondaryTree, err := scanner.Scan(secondaryPath2)
 		if err != nil {
 			log.Printf("ERROR scanning secondary: %v", err)
 			return
 		}
-		rootACL := populateACL(primaryTree, primaryPath2, acltype, log)
 
 		// EXISTING-FOLDER ACL RE-SYNC (Gea decision 2026.07.24, "option B"
 		// of the mkdirWithACL fix follow-up discussion): reconcile's
@@ -211,7 +305,11 @@ func runCmd(args []string, apply_ bool) {
 		return
 	}
 
-	w, err := watch.New([]string{primaryPath2, secondaryPath2}, watch.Options{
+	watchRoots := []string{primaryPath2}
+	if secondaryPath2 != "" {
+		watchRoots = append(watchRoots, secondaryPath2)
+	}
+	w, err := watch.New(watchRoots, watch.Options{
 		Debounce: *debounce, SafetyNet: *rescan, MaxWatchedDirs: *maxWatched,
 	})
 	if err != nil {
@@ -468,4 +566,57 @@ func opName(k reconcile.OpKind) string {
 		return "CONFLICT"
 	}
 	return "?"
+}
+
+// sanitizeName turns a remote address into a filesystem-safe state dir name.
+func sanitizeName(addr string) string {
+	out := make([]rune, 0, len(addr))
+	for _, r := range addr {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '-', r == '_':
+			out = append(out, r)
+		default:
+			out = append(out, '_')
+		}
+	}
+	return string(out)
+}
+
+// serveCmd is the 2.0 receiver ("cs-sync serve", cs-sync-2.0-design.info
+// sections 4+6): applies incoming operations under --dest with atomic
+// temp+hash-verify+rename writes. Encryption is cs-stream's job -- put a
+// tunnel-listen in front for anything beyond loopback.
+func serveCmd(args []string) {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	dest := fs.String("dest", "", "destination folder on ZFS (required)")
+	listen := fs.String("listen", "127.0.0.1:9010", "listen address")
+	logPath := fs.String("log", "", "log file path")
+	fs.Parse(args)
+
+	if *dest == "" {
+		fmt.Fprintln(os.Stderr, "error: --dest is required")
+		os.Exit(2)
+	}
+	dest2, _ := filepath.Abs(*dest)
+	if *logPath == "" {
+		if d, err := state.Dir(dest2); err == nil {
+			*logPath = filepath.Join(d, "cs-sync.log")
+		}
+	}
+	log, err := logging.New(*logPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "cannot open log:", err)
+		os.Exit(1)
+	}
+	acltype, err := zfscheck.CheckAndPrepare(dest2)
+	if err != nil {
+		log.Printf("FATAL: dest precondition check failed: %v", err)
+		os.Exit(1)
+	}
+	cleanupTmp(dest2, log)
+	rv := &remote.Receiver{Dest: dest2, AclType: acltype, Version: version, Log: log}
+	if err := rv.Serve(*listen); err != nil {
+		log.Printf("FATAL: %v", err)
+		os.Exit(1)
+	}
 }
