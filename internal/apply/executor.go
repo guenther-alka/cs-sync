@@ -121,14 +121,33 @@ func mkdirWithACL(dstRoot, relPath string, roots Roots, log Logf) error {
 		return nil
 	}
 
-	parentRel := filepath.ToSlash(filepath.Dir(relPath))
-	parentOnPrimary := filepath.Join(roots.Primary, filepath.FromSlash(parentRel))
-	if parentRel == "." {
-		parentOnPrimary = roots.Primary
+	// BUG FIX 2026.07.24 (real-host validation on FreeBSD, tank/data2 vs
+	// tank/data5): this used to unconditionally read the ACL of relPath's
+	// PARENT on primary, even when primary already had relPath ITSELF
+	// (the exact folder being created here) with its own, possibly
+	// non-inherited ACL (e.g. an explicit extra ACE beyond whatever
+	// aclinherit=passthrough would produce). Verified live: a folder
+	// with a manually-added user:daemon:... ACE lost that ACE on the
+	// secondary copy because only the dataset-root ACL (relPath's
+	// parent, "." for a top-level folder) was ever consulted. Primary
+	// is the ACL source of truth (section 10) -- if the folder already
+	// exists there, its OWN current ACL is the correct source; the
+	// parent-based read is now only a fallback for the (normally
+	// impossible, but defensive) case where SrcSide=primary yet the
+	// path is not actually present there yet.
+	ownOnPrimary := filepath.Join(roots.Primary, filepath.FromSlash(relPath))
+	srcForRead := ownOnPrimary
+	if _, err := os.Stat(ownOnPrimary); err != nil {
+		parentRel := filepath.ToSlash(filepath.Dir(relPath))
+		parentOnPrimary := filepath.Join(roots.Primary, filepath.FromSlash(parentRel))
+		if parentRel == "." {
+			parentOnPrimary = roots.Primary
+		}
+		srcForRead = parentOnPrimary
 	}
-	text, err := acl.Read(parentOnPrimary, roots.AclType)
+	text, err := acl.Read(srcForRead, roots.AclType)
 	if err != nil {
-		log("WARN: could not read parent ACL for %s: %v", relPath, err)
+		log("WARN: could not read ACL for %s (source %s): %v", relPath, srcForRead, err)
 		return nil // do not fail the whole sync over an ACL read issue
 	}
 	if err := acl.Apply(dst, roots.AclType, text); err != nil {
