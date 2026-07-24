@@ -1,4 +1,4 @@
-//go:build linux || freebsd
+//go:build linux
 
 package acl
 
@@ -10,9 +10,9 @@ import (
 	"strings"
 )
 
-// readNFS4ACL uses nfs4_getfacl (Linux: nfs4-acl-tools package; FreeBSD:
-// native). Comment lines (leading '#') are stripped, leaving one ACE
-// per line in the canonical form nfs4_setfacl expects back.
+// readNFS4ACL uses nfs4_getfacl (Linux nfs4-acl-tools package). Comment
+// lines (leading '#') are stripped, leaving one ACE per line in the
+// canonical form nfs4_setfacl expects back.
 func readNFS4ACL(path string) (string, error) {
 	out, err := exec.Command("nfs4_getfacl", path).Output()
 	if err != nil {
@@ -32,10 +32,7 @@ func readNFS4ACL(path string) (string, error) {
 }
 
 // applyNFS4ACL replaces the folder's full ACL from the stored ACE lines.
-// NOTE (v1 TODO): -S (Linux nfs4-acl-tools) replaces the whole ACL from a
-// file. FreeBSD's nfs4_setfacl flag for "replace whole ACL from file" may
-// differ slightly (verify against the target FreeBSD release's man page
-// before production use) -- flagged here rather than silently assumed.
+// nfs4_setfacl -S replaces the whole ACL from a file (Linux nfs4-acl-tools).
 func applyNFS4ACL(path, text string) error {
 	tmp, err := os.CreateTemp("", "cs-sync-nfs4-*.acl")
 	if err != nil {
