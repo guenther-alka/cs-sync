@@ -33,6 +33,10 @@ change detection -- not polling. FEN (File Events Notification)
 associations fire once and are re-armed after each event; see
 `internal/watch/watch_eventport_illumossolaris.go`.
 
+## Download
+
+Pre-built binaries for all platforms in [Releases](https://github.com/guenther-alka/cs-sync/releases/latest):
+
 ## Build
 
 ```
