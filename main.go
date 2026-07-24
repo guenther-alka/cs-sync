@@ -142,6 +142,32 @@ func runCmd(args []string, apply_ bool) {
 		}
 		rootACL := populateACL(primaryTree, primaryPath2, acltype, log)
 
+		// EXISTING-FOLDER ACL RE-SYNC (Gea decision 2026.07.24, "option B"
+		// of the mkdirWithACL fix follow-up discussion): reconcile's
+		// identity check is size+mtime+type only (model.SameIdentity,
+		// "dir identity is its existence + ACL, checked separately" -- this
+		// IS that separate check). A later ACL-only edit on an existing
+		// primary folder (e.g. adding an ACE with setfacl/nfs4_setfacl/
+		// chmod A+ after the folder was already created and synced) has NO
+		// effect on size/mtime/type, so it produces zero reconcile.Op's and
+		// would otherwise NEVER propagate to secondary during normal live
+		// operation -- only brand-new folders (mkdirWithACL) and the
+		// startup bootstrapACL restore flow ever touched folder ACLs
+		// before this fix. MUST run before the "no changes" early return
+		// below, since the whole point is to catch ACL-only edits that
+		// produce no ops. Deliberately gated to safety-net/sighup passes
+		// only (not every debounced event pass, typically every few
+		// hundred ms-seconds): primary's folder ACL is already read every
+		// pass via populateACL above (existing cost), but pushing it onto
+		// secondary needs one exec call (setfacl/nfs4_setfacl/chmod) per
+		// existing folder on the secondary side too -- cheap once per
+		// --rescan interval (default 24h) or on-demand via SIGHUP, not
+		// worth paying on every fast event pass. See cs-sync.info section
+		// 4/10/14.
+		if apply_ && (reason == "safety-net" || reason == "sighup") {
+			syncExistingFolderACLs(primaryTree, secondaryPath2, acltype, log)
+		}
+
 		if *mode == "oneway" {
 			forceOneway(&st.Baseline, primaryTree, secondaryTree)
 		}
@@ -357,6 +383,43 @@ func populateACL(tree model.Tree, root, acltype string, log *logging.Logger) str
 		return ""
 	}
 	return rootACL
+}
+
+// syncExistingFolderACLs re-applies primary's current folder ACL onto the
+// corresponding EXISTING secondary folder, for every directory present on
+// BOTH sides. This is the "checked separately" half of dir identity
+// (model.SameIdentity's doc comment) -- newly created folders already get
+// primary's ACL via mkdirWithACL (internal/apply/executor.go), and a
+// fresh/recovered start gets it via bootstrapACL, but an ACL-only edit on
+// an already-synced, pre-existing folder had no other path to secondary
+// before this (see the call site's comment in runCmd/doPass for why this
+// only runs on safety-net/sighup passes, not every event pass).
+//
+// KISS: unconditionally re-applies rather than reading secondary's ACL
+// first to compare -- this only runs once per --rescan interval (default
+// 24h) or on-demand via SIGHUP, so the extra idempotent applies are cheap;
+// avoiding a second per-folder read on secondary keeps this simple and
+// keeps the exec-call count to one per folder (matching mkdirWithACL's
+// existing cost model) instead of two.
+func syncExistingFolderACLs(primaryTree model.Tree, secondaryPath2, acltype string, log *logging.Logger) {
+	n := 0
+	for relpath, pe := range primaryTree {
+		if pe.Type != model.TypeDir || pe.ACL == "" {
+			continue
+		}
+		dst := filepath.Join(secondaryPath2, filepath.FromSlash(relpath))
+		if fi, err := os.Stat(dst); err != nil || !fi.IsDir() {
+			continue // not on secondary yet -- normal reconcile creates it (with ACL) separately
+		}
+		if err := acl.Apply(dst, acltype, pe.ACL); err != nil {
+			log.Printf("WARN: could not re-sync ACL for %s: %v", relpath, err)
+			continue
+		}
+		n++
+	}
+	if n > 0 {
+		log.Printf("existing-folder ACL re-sync: %d folder(s) refreshed on secondary", n)
+	}
 }
 
 // applyOrdered runs creates/renames/conflict-renames first (in the ascending
