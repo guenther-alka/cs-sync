@@ -7,6 +7,10 @@
 // SDDL); the acl package's Windows implementation uses Get-Acl/Set-Acl
 // which works identically on all three. "nfs4" is the type token that
 // routes through the Windows ACL path in the acl package.
+//
+// MACOS: returns "none" if ZFS is not installed (APFS/HFS+): file sync
+// only, no ACL propagation. If OpenZFS for Mac is installed and the path
+// is on a ZFS dataset, normal nfs4 ACL sync applies.
 package zfscheck
 
 import (
@@ -43,8 +47,7 @@ func listDatasets() ([]Dataset, error) {
 }
 
 // ParentDataset finds the ZFS dataset whose mountpoint is the longest
-// matching prefix of folderPath. Returns ("", nil) if no dataset matches
-// (non-ZFS path -- caller decides whether that's an error).
+// matching prefix of folderPath. Returns ("", nil) if no dataset matches.
 func ParentDataset(folderPath string) (Dataset, error) {
 	abs, err := filepath.Abs(folderPath)
 	if err != nil {
@@ -69,7 +72,7 @@ func ParentDataset(folderPath string) (Dataset, error) {
 		}
 	}
 	if bestLen < 0 {
-		return Dataset{}, nil // not on ZFS -- not an error, caller gets ""
+		return Dataset{}, nil
 	}
 	return best, nil
 }
@@ -91,52 +94,54 @@ func SetProp(dataset, prop, value string) error {
 	return nil
 }
 
-// CheckAndPrepare implements section 2: find the parent ZFS dataset, read
-// acltype, set aclinherit=passthrough. Returns:
+// CheckAndPrepare implements section 2. Returns:
 //   - "posix"  -- Linux ZFS with acltype=posixacl
 //   - "nfs4"   -- illumos/Solaris/FreeBSD/OpenZFS-on-Windows (always NFSv4)
 //                 AND Windows NTFS/ReFS (same Windows security model/SDDL)
-//   - "none"   -- not returned on any platform (reserved)
+//   - "none"   -- macOS APFS/HFS+ without ZFS: file sync only, no ACL sync
 //
 // Platform notes:
 //
-// illumos/Solaris: no "acltype" property exists -- hardcode nfs4.
+// illumos/Solaris/FreeBSD: no "acltype" read -- hardcode nfs4.
+// FreeBSD: zfs get acltype may return "posixacl" but the actual ACL
+// tools are nfs4_getfacl/nfs4_setfacl (or getfacl/setfacl for nfsv4 datasets);
+// "posixacl" is a compat label. Treating as nfs4 is correct.
 //
 // Windows (OpenZFS on Windows + NTFS/ReFS): always "nfs4". All Windows
 // filesystems share the Windows security model; Get-Acl/Set-Acl works
 // identically on ZFS, NTFS, and ReFS.
 //
-// FreeBSD: acltype=posixacl or nfsv4 on ZFS datasets.
-// NOTE: FreeBSD is treated like illumos -- always returns "nfs4".
-// zfs get acltype may report "posixacl" on FreeBSD but the actual ACL
-// tools are nfs4_getfacl/nfs4_setfacl; the property is a compat label.
+// macOS: if ZFS not installed, returns "none" (APFS/HFS+ file sync only).
+// If OpenZFS for Mac is installed and path is on ZFS, normal nfs4 applies.
 func CheckAndPrepare(folderPath string) (string, error) {
 	isIllumos := runtime.GOOS == "illumos" || runtime.GOOS == "solaris" || runtime.GOOS == "freebsd"
 
 	ds, err := ParentDataset(folderPath)
 	if err != nil {
-		// zfs binary missing or not in PATH
-		if runtime.GOOS == "windows" {
-			// No ZFS, but Windows ACL sync (Get-Acl/Set-Acl) still works.
+		switch runtime.GOOS {
+		case "windows":
 			return "nfs4", nil
+		case "darwin":
+			return "none", nil
 		}
 		return "", err
 	}
 
-	// No ZFS dataset found for this path.
 	if ds.Name == "" {
-		if runtime.GOOS == "windows" {
-			// NTFS/ReFS: Windows ACL model works on all Windows filesystems.
+		switch runtime.GOOS {
+		case "windows":
 			return "nfs4", nil
+		case "darwin":
+			return "none", nil
+		default:
+			return "", fmt.Errorf("no ZFS dataset found for %s -- is it on a ZFS mount?", folderPath)
 		}
-		return "", fmt.Errorf("no ZFS dataset found for %s -- is it on a ZFS mount?", folderPath)
 	}
 
 	acltype := "nfs4"
 	if !isIllumos {
 		raw, err := GetProp(ds.Name, "acltype")
 		if err != nil {
-			// OpenZFS on Windows may not support "acltype" on older builds.
 			if runtime.GOOS == "windows" {
 				acltype = "nfs4"
 			} else {
@@ -156,8 +161,6 @@ func CheckAndPrepare(folderPath string) (string, error) {
 		}
 	}
 
-	// aclinherit=passthrough: best-effort, non-fatal on failure.
-	// OpenZFS-on-Windows older builds may not support this property.
 	_ = SetProp(ds.Name, "aclinherit", "passthrough")
 	return acltype, nil
 }
