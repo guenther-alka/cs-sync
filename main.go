@@ -96,6 +96,7 @@ func runCmd(args []string, apply_ bool) {
 	bwlimit := fs.Int64("bwlimit", 0, "2.0: remote rate limit bytes/s, 0=unlimited")
 	maxDelCount := fs.Int("max-delete-count", 1000, "2.0: delete-budget guard, 0=off")
 	maxDelPercent := fs.Int("max-delete-percent", 20, "2.0: delete-budget guard, 0=off")
+	transferKey := fs.String("key", "", "2.0: pre-shared transfer key (first 20 chars of the shared napp-it CS cluster secret) -- must match the receiver's --key")
 	fs.Parse(args)
 
 	if *primaryPath == "" {
@@ -176,11 +177,12 @@ func runCmd(args []string, apply_ bool) {
 			Primary:  primaryPath2,
 			Addr:     *remoteAddr,
 			StateDir: filepath.Join(sd, "remote_"+name),
-			AclType:  acltype,
-			Budget:   guard.Budget{MaxCount: *maxDelCount, MaxPercent: *maxDelPercent},
-			Limiter:  remote.NewLimiter(*bwlimit),
-			Version:  version,
-			Log:      log,
+			AclType:     acltype,
+			TransferKey: *transferKey,
+			Budget:      guard.Budget{MaxCount: *maxDelCount, MaxPercent: *maxDelPercent},
+			Limiter:     remote.NewLimiter(*bwlimit),
+			Version:     version,
+			Log:         log,
 		}
 		if err := sender.Init(); err != nil {
 			log.Printf("FATAL: remote state init: %v", err)
@@ -595,6 +597,7 @@ func serveCmd(args []string) {
 	dest := fs.String("dest", "", "destination folder on ZFS (required)")
 	listen := fs.String("listen", "127.0.0.1:9010", "listen address")
 	logPath := fs.String("log", "", "log file path")
+	transferKey := fs.String("key", "", "2.0: pre-shared transfer key, must match the sender's --key -- empty accepts any sender (fine on loopback behind a cs-stream tunnel, not otherwise)")
 	fs.Parse(args)
 
 	if *dest == "" {
@@ -618,7 +621,10 @@ func serveCmd(args []string) {
 		os.Exit(1)
 	}
 	cleanupTmp(dest2, log)
-	rv := &remote.Receiver{Dest: dest2, AclType: acltype, Version: version, Log: log}
+	rv := &remote.Receiver{Dest: dest2, AclType: acltype, TransferKey: *transferKey, Version: version, Log: log}
+	if *transferKey == "" {
+		log.Printf("WARN: no --key set -- any sender that can reach %s will be accepted (fine on loopback behind a cs-stream tunnel, not otherwise)", *listen)
+	}
 	if err := rv.Serve(*listen); err != nil {
 		log.Printf("FATAL: %v", err)
 		os.Exit(1)
