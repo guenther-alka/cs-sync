@@ -107,8 +107,11 @@ func SetProp(dataset, prop, value string) error {
 // identically on ZFS, NTFS, and ReFS.
 //
 // FreeBSD: acltype=posixacl or nfsv4 on ZFS datasets.
+// NOTE: FreeBSD is treated like illumos -- always returns "nfs4".
+// zfs get acltype may report "posixacl" on FreeBSD but the actual ACL
+// tools are nfs4_getfacl/nfs4_setfacl; the property is a compat label.
 func CheckAndPrepare(folderPath string) (string, error) {
-	isIllumos := runtime.GOOS == "illumos" || runtime.GOOS == "solaris"
+	isIllumos := runtime.GOOS == "illumos" || runtime.GOOS == "solaris" || runtime.GOOS == "freebsd"
 
 	ds, err := ParentDataset(folderPath)
 	if err != nil {
