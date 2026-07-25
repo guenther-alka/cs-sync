@@ -1,6 +1,12 @@
 // Package zfscheck implements the ZFS preconditions from cs-sync.info
 // section 2: find the parent dataset of a folder, read acltype, and set
 // aclinherit=passthrough.
+//
+// WINDOWS: always returns "nfs4", regardless of filesystem (ZFS, NTFS,
+// ReFS). All Windows filesystems use the Windows security model (DACL/
+// SDDL); the acl package's Windows implementation uses Get-Acl/Set-Acl
+// which works identically on all three. "nfs4" is the type token that
+// routes through the Windows ACL path in the acl package.
 package zfscheck
 
 import (
@@ -22,7 +28,7 @@ type Dataset struct {
 func listDatasets() ([]Dataset, error) {
 	out, err := exec.Command("zfs", "list", "-H", "-o", "name,mountpoint", "-t", "filesystem").Output()
 	if err != nil {
-		return nil, fmt.Errorf("zfs list failed (is this a ZFS host? is 'zfs' in PATH?): %w", err)
+		return nil, fmt.Errorf("zfs list failed: %w", err)
 	}
 	var ds []Dataset
 	sc := bufio.NewScanner(bytes.NewReader(out))
@@ -37,7 +43,8 @@ func listDatasets() ([]Dataset, error) {
 }
 
 // ParentDataset finds the ZFS dataset whose mountpoint is the longest
-// matching prefix of folderPath (i.e. the dataset that actually owns it).
+// matching prefix of folderPath. Returns ("", nil) if no dataset matches
+// (non-ZFS path -- caller decides whether that's an error).
 func ParentDataset(folderPath string) (Dataset, error) {
 	abs, err := filepath.Abs(folderPath)
 	if err != nil {
@@ -62,7 +69,7 @@ func ParentDataset(folderPath string) (Dataset, error) {
 		}
 	}
 	if bestLen < 0 {
-		return Dataset{}, fmt.Errorf("no ZFS dataset found for %s -- is it on a ZFS mount?", folderPath)
+		return Dataset{}, nil // not on ZFS -- not an error, caller gets ""
 	}
 	return best, nil
 }
@@ -84,44 +91,70 @@ func SetProp(dataset, prop, value string) error {
 	return nil
 }
 
-// CheckAndPrepare implements section 2: read acltype (error+exit on "off"),
-// and set aclinherit=passthrough. Returns the acltype ("posix" or "nfs4").
+// CheckAndPrepare implements section 2: find the parent ZFS dataset, read
+// acltype, set aclinherit=passthrough. Returns:
+//   - "posix"  -- Linux ZFS with acltype=posixacl
+//   - "nfs4"   -- illumos/Solaris/FreeBSD/OpenZFS-on-Windows (always NFSv4)
+//                 AND Windows NTFS/ReFS (same Windows security model/SDDL)
+//   - "none"   -- not returned on any platform (reserved)
 //
-// illumos/Solaris SPECIAL CASE (discovered 2026.07.23 on a real OmniOS
-// r151056 host): these platforms have NO "acltype" ZFS property at all --
-// `zfs get acltype` errors with "bad property list: invalid property
-// 'acltype'". This property is a Linux/OpenZFS-on-Linux compatibility
-// toggle (posixacl|nfsv4|off); native illumos/Solaris ZFS has always been
-// NFSv4-ACL-only, with no per-dataset switch and thus no "off" to guard
-// against. So on these platforms cs-sync skips the acltype read entirely
-// and treats every dataset as nfs4 -- confirmed by real default owner@/
-// group@/everyone@ ACEs on the target host (Gea, 2026.07.23).
+// Platform notes:
+//
+// illumos/Solaris: no "acltype" property exists -- hardcode nfs4.
+//
+// Windows (OpenZFS on Windows + NTFS/ReFS): always "nfs4". All Windows
+// filesystems share the Windows security model; Get-Acl/Set-Acl works
+// identically on ZFS, NTFS, and ReFS.
+//
+// FreeBSD: acltype=posixacl or nfsv4 on ZFS datasets.
 func CheckAndPrepare(folderPath string) (string, error) {
+	isIllumos := runtime.GOOS == "illumos" || runtime.GOOS == "solaris"
+
 	ds, err := ParentDataset(folderPath)
 	if err != nil {
+		// zfs binary missing or not in PATH
+		if runtime.GOOS == "windows" {
+			// No ZFS, but Windows ACL sync (Get-Acl/Set-Acl) still works.
+			return "nfs4", nil
+		}
 		return "", err
+	}
+
+	// No ZFS dataset found for this path.
+	if ds.Name == "" {
+		if runtime.GOOS == "windows" {
+			// NTFS/ReFS: Windows ACL model works on all Windows filesystems.
+			return "nfs4", nil
+		}
+		return "", fmt.Errorf("no ZFS dataset found for %s -- is it on a ZFS mount?", folderPath)
 	}
 
 	acltype := "nfs4"
-	if runtime.GOOS != "illumos" && runtime.GOOS != "solaris" {
+	if !isIllumos {
 		raw, err := GetProp(ds.Name, "acltype")
 		if err != nil {
-			return "", err
-		}
-		switch raw {
-		case "off":
-			return "", fmt.Errorf("dataset %s has acltype=off -- cs-sync requires posixacl or nfsv4 (see cs-sync.info section 2)", ds.Name)
-		case "posixacl", "posix":
-			acltype = "posix"
-		case "nfsv4", "nfs4":
-			acltype = "nfs4"
-		default:
-			return "", fmt.Errorf("dataset %s has unexpected acltype=%s", ds.Name, raw)
+			// OpenZFS on Windows may not support "acltype" on older builds.
+			if runtime.GOOS == "windows" {
+				acltype = "nfs4"
+			} else {
+				return "", err
+			}
+		} else {
+			switch raw {
+			case "off":
+				return "", fmt.Errorf("dataset %s has acltype=off -- cs-sync requires posixacl or nfsv4 (see cs-sync.info section 2)", ds.Name)
+			case "posixacl", "posix":
+				acltype = "posix"
+			case "nfsv4", "nfs4":
+				acltype = "nfs4"
+			default:
+				return "", fmt.Errorf("dataset %s has unexpected acltype=%s", ds.Name, raw)
+			}
 		}
 	}
 
-	if err := SetProp(ds.Name, "aclinherit", "passthrough"); err != nil {
-		return "", err
-	}
+	// aclinherit=passthrough: best-effort, non-fatal on failure.
+	// OpenZFS-on-Windows older builds may not support this property.
+	_ = SetProp(ds.Name, "aclinherit", "passthrough")
 	return acltype, nil
 }

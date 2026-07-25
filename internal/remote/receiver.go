@@ -25,10 +25,11 @@ import (
 // time (KISS; the sender is a single loop anyway -- queue-level
 // parallelism is a later optimization, section 13).
 type Receiver struct {
-	Dest    string
-	AclType string
-	Version string
-	Log     *logging.Logger
+	Dest        string
+	AclType     string
+	Version     string
+	TransferKey string // section 15: pre-shared key check, "" disables it
+	Log         *logging.Logger
 }
 
 // Serve listens on addr and handles connections until a fatal listener
@@ -79,6 +80,20 @@ func (rv *Receiver) handle(c net.Conn) {
 	if hello.ProtoVersion != wire.ProtoVersion {
 		rv.Log.Printf("REFUSING: protocol version mismatch (peer=%d local=%d) -- update both members", hello.ProtoVersion, wire.ProtoVersion)
 		_ = cn.Send(wire.TAck, wire.Ack{OK: false, Err: fmt.Sprintf("protocol version mismatch: peer=%d local=%d", hello.ProtoVersion, wire.ProtoVersion)})
+		return
+	}
+	if rv.TransferKey != "" && hello.Key != rv.TransferKey {
+		rv.Log.Printf("REFUSING connection from %s: transfer key mismatch", c.RemoteAddr())
+		_ = cn.Send(wire.TAck, wire.Ack{OK: false, Err: "transfer key mismatch"})
+		return
+	}
+	// explicit accept ack -- the sender's connect() waits for this before
+	// declaring itself connected (bug found in sandbox testing 2026.07.25:
+	// without it, the sender logged "remote connected" and only discovered
+	// the key mismatch on its FIRST actual data roundtrip, which was
+	// confusing/misleading even though nothing was ever transferred).
+	if err := cn.Send(wire.TAck, wire.Ack{OK: true}); err != nil {
+		rv.Log.Printf("handshake accept-ack send failed: %v", err)
 		return
 	}
 	rv.Log.Printf("peer: cs-sync %s os=%s proto=%d", hello.SyncVersion, hello.OS, hello.ProtoVersion)

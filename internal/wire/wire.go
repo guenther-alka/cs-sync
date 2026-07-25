@@ -55,6 +55,15 @@ type Welcome struct {
 	SyncVersion  string // cs-sync binary version, for logs
 	OS           string // runtime.GOOS -- drives same-OS native ACL decision
 	AclType      string // "posix" | "nfs4" (receiver: dest dataset's type)
+	Key          string // transfer key (section 15): first 20 chars of the
+	// shared napp-it CS cluster secret (server.auth),
+	// reused as-is -- both members already have the
+	// identical value via existing group membership,
+	// no separate secret to distribute. This is a
+	// PRE-SHARED-KEY CHECK, not encryption (that is
+	// cs-stream's job, section 6) -- it only stops an
+	// unrelated caller from connecting to a listening
+	// cs-sync serve and pushing/pulling data.
 }
 
 // Op carries mkdir/rename/delete/rmdir/symlink metadata.

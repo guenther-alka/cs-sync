@@ -1,4 +1,4 @@
-//go:build !linux && !freebsd && !illumos && !solaris
+//go:build !linux && !freebsd && !illumos && !solaris && !windows
 
 package acl
 

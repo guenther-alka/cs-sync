@@ -32,14 +32,15 @@ import (
 // the baseline is persisted. No separate queue file is needed -- only the
 // retry/quarantine state (guard.RetryState) is stored in addition.
 type Sender struct {
-	Primary  string
-	Addr     string // receiver address (usually a local cs-stream tunnel-send endpoint)
-	StateDir string // per-pair dir, holds remote baseline + retry state + freeze marker
-	AclType  string
-	Budget   guard.Budget
-	Limiter  *Limiter // nil = unlimited
-	Version  string
-	Log      *logging.Logger
+	Primary     string
+	Addr        string // receiver address (usually a local cs-stream tunnel-send endpoint)
+	StateDir    string // per-pair dir, holds remote baseline + retry state + freeze marker
+	AclType     string
+	TransferKey string // section 15: sent in the handshake, "" = none
+	Budget      guard.Budget
+	Limiter     *Limiter // nil = unlimited
+	Version     string
+	Log         *logging.Logger
 
 	conn     *wire.Conn
 	peer     wire.Welcome
@@ -97,10 +98,31 @@ func (s *Sender) connect() error {
 	}
 	if err := cn.Send(wire.TWelcome, wire.Welcome{
 		ProtoVersion: wire.ProtoVersion, SyncVersion: s.Version,
-		OS: runtime.GOOS, AclType: s.AclType,
+		OS: runtime.GOOS, AclType: s.AclType, Key: s.TransferKey,
 	}); err != nil {
 		c.Close()
 		return err
+	}
+	// wait for the receiver's explicit accept-ack (see receiver.go handle()
+	// comment) -- without this, a key mismatch was only discovered on the
+	// first real op, and this function had already logged success.
+	at, ap, err := cn.Recv()
+	if err != nil {
+		c.Close()
+		return fmt.Errorf("handshake accept-ack: %w", err)
+	}
+	if at != wire.TAck {
+		c.Close()
+		return fmt.Errorf("handshake: expected accept-ack, got frame %d", at)
+	}
+	var aack wire.Ack
+	if err := wire.Decode(ap, &aack); err != nil {
+		c.Close()
+		return err
+	}
+	if !aack.OK {
+		c.Close()
+		return fmt.Errorf("REFUSED by receiver: %s", aack.Err)
 	}
 	s.conn = cn
 	// section 14: native ACL application ADDITIONALLY when both ends run
