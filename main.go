@@ -145,7 +145,11 @@ func runCmd(args []string, apply_ bool) {
 			log.Printf("WARN: acltype differs (primary=%s secondary=%s) -- using primary's acltype as authoritative", acltypeP, acltypeS)
 		}
 	}
-	log.Printf("acltype=%s (aclinherit=passthrough set on both parent datasets)", acltype)
+	if acltype == "none" {
+		log.Printf("acltype=none (non-ZFS filesystem, file sync only -- no ACL propagation)")
+	} else {
+		log.Printf("acltype=%s (aclinherit=passthrough set on both parent datasets)", acltype)
+	}
 
 	// remove leftover crash-safety temp files from a previous run (section 8)
 	cleanupTmp(primaryPath2, log)
