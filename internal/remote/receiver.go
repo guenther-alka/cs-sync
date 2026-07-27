@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"time"
 
 	"github.com/guenther-alka/cs-sync/internal/acl"
@@ -28,27 +27,39 @@ type Receiver struct {
 	Dest        string
 	AclType     string
 	Version     string
-	TransferKey string // section 15: pre-shared key check, "" disables it
-	Log         *logging.Logger
+	TransferKey string // REQUIRED: also used to derive the ChaCha20-Poly1305
+	// session key (native encryption, replaces the old cs-stream-tunnel-only
+	// design). Both ends must share the identical value.
+	AllowIP string // REQUIRED (Gea 2026.07.25): only this single source IP
+	// may connect -- an arbitrary host on the LAN must not be able to even
+	// attempt a handshake. Empty AllowIP means "accept from anywhere",
+	// which main.go refuses to start with for a non-loopback listener.
+	Log *logging.Logger
 }
 
 // Serve listens on addr and handles connections until a fatal listener
-// error. Non-loopback binds are allowed (cs-stream tunnel-listen usually
-// forwards to loopback, but direct LAN use is possible) -- a WARN reminds
-// the operator that cs-sync itself does not encrypt (section 6).
+// error. Every connection not from AllowIP is refused before any protocol
+// exchange (Gea 2026.07.25: prevents an arbitrary LAN host from even
+// attempting a handshake).
 func (rv *Receiver) Serve(addr string) error {
-	if !strings.HasPrefix(addr, "127.") && !strings.HasPrefix(addr, "localhost") {
-		rv.Log.Printf("WARN: listening on %s -- cs-sync does NOT encrypt; use a cs-stream tunnel for anything beyond loopback", addr)
-	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
 	}
-	rv.Log.Printf("cs-sync serve %s: dest=%s acltype=%s listening on %s", rv.Version, rv.Dest, rv.AclType, addr)
+	rv.Log.Printf("cs-sync serve %s: dest=%s acltype=%s listening on %s (encrypted, allow-ip=%s)",
+		rv.Version, rv.Dest, rv.AclType, addr, rv.AllowIP)
 	for {
 		c, err := ln.Accept()
 		if err != nil {
 			return err
+		}
+		if rv.AllowIP != "" {
+			host, _, splitErr := net.SplitHostPort(c.RemoteAddr().String())
+			if splitErr != nil || host != rv.AllowIP {
+				rv.Log.Printf("REFUSING connection from %s: not the allow-listed IP (%s)", c.RemoteAddr(), rv.AllowIP)
+				c.Close()
+				continue
+			}
 		}
 		rv.handle(c) // sequential by design
 	}
@@ -56,7 +67,7 @@ func (rv *Receiver) Serve(addr string) error {
 
 func (rv *Receiver) handle(c net.Conn) {
 	defer c.Close()
-	cn := wire.New(c)
+	cn := wire.NewEncrypted(c, rv.TransferKey)
 	rv.Log.Printf("connection from %s", c.RemoteAddr())
 
 	// handshake: receiver first (section 6)

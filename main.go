@@ -97,6 +97,7 @@ func runCmd(args []string, apply_ bool) {
 	maxDelCount := fs.Int("max-delete-count", 1000, "2.0: delete-budget guard, 0=off")
 	maxDelPercent := fs.Int("max-delete-percent", 20, "2.0: delete-budget guard, 0=off")
 	transferKey := fs.String("key", "", "2.0: pre-shared transfer key (first 20 chars of the shared napp-it CS cluster secret) -- must match the receiver's --key")
+	serviceID := fs.String("service-id", "", "optional: service id for status (_cfg/sync/<id>.last) and, for --mode oneway, loop detection")
 	fs.Parse(args)
 
 	if *primaryPath == "" {
@@ -109,6 +110,10 @@ func runCmd(args []string, apply_ bool) {
 	}
 	if !apply_ && *secondaryPath == "" {
 		fmt.Fprintln(os.Stderr, "error: scan needs --secondary")
+		os.Exit(2)
+	}
+	if apply_ && *remoteAddr != "" && *transferKey == "" {
+		fmt.Fprintln(os.Stderr, "error: --key is required when --remote is set (cs-sync now encrypts natively; empty key is refused)")
 		os.Exit(2)
 	}
 	primaryPath2, _ := filepath.Abs(*primaryPath)
@@ -128,11 +133,13 @@ func runCmd(args []string, apply_ bool) {
 		os.Exit(1)
 	}
 	log.Printf("cs-sync %s starting: primary=%s secondary=%s mode=%s", version, primaryPath2, secondaryPath2, *mode)
+	loopStamp := newLoopStamp()
 
 	// --- section 2: ZFS preconditions ---
 	acltypeP, err := zfscheck.CheckAndPrepare(primaryPath2)
 	if err != nil {
 		log.Printf("FATAL: primary precondition check failed: %v", err)
+		writeStatus(*serviceID, fmt.Sprintf("error: primary precondition check failed: %v", err))
 		os.Exit(1)
 	}
 	acltype := acltypeP
@@ -140,6 +147,7 @@ func runCmd(args []string, apply_ bool) {
 		acltypeS, err := zfscheck.CheckAndPrepare(secondaryPath2)
 		if err != nil {
 			log.Printf("FATAL: secondary precondition check failed: %v", err)
+			writeStatus(*serviceID, fmt.Sprintf("error: secondary precondition check failed: %v", err))
 			os.Exit(1)
 		}
 		if acltypeP != acltypeS {
@@ -150,6 +158,14 @@ func runCmd(args []string, apply_ bool) {
 		log.Printf("acltype=none (non-ZFS filesystem, file sync only -- no ACL propagation)")
 	} else {
 		log.Printf("acltype=%s (aclinherit=passthrough set on both parent datasets)", acltype)
+	}
+
+	// preconditions passed -- now safe to record status and drop the loop
+	// marker (writing it earlier, before we know primary/secondary are
+	// even valid ZFS-checked paths, would be premature bookkeeping).
+	writeStatus(*serviceID, fmt.Sprintf("started (%s)", time.Now().Format("2006-01-02 15:04:05")))
+	if apply_ && *serviceID != "" && *mode == "oneway" && secondaryPath2 != "" {
+		writeLoopMarker(secondaryPath2, *serviceID, loopStamp)
 	}
 
 	// remove leftover crash-safety temp files from a previous run (section 8)
@@ -202,6 +218,11 @@ func runCmd(args []string, apply_ bool) {
 	}
 
 	doPass := func(reason string) {
+		if *serviceID != "" && *mode == "oneway" && checkLoopMarker(primaryPath2, *serviceID, loopStamp) {
+			log.Printf("FATAL: loop detected -- this service's own marker returned to its primary via a sync chain (a -> b -> ... -> a); stopping")
+			writeStatus(*serviceID, "error: loop detected")
+			os.Exit(1)
+		}
 		st, err := state.Load(primaryPath2)
 		if err != nil {
 			log.Printf("ERROR loading state: %v", err)
@@ -281,6 +302,9 @@ func runCmd(args []string, apply_ bool) {
 
 		if apply_ {
 			applyOrdered(res.Ops, roots, log)
+			if *serviceID != "" {
+				writeLastFileStatus(*serviceID, res.Ops)
+			}
 			newState := &model.State{Baseline: res.NewBaseline, AclType: acltype}
 			if err := state.Save(primaryPath2, newState); err != nil {
 				log.Printf("ERROR saving state: %v", err)
@@ -590,18 +614,31 @@ func sanitizeName(addr string) string {
 
 // serveCmd is the 2.0 receiver ("cs-sync serve", cs-sync-2.0-design.info
 // sections 4+6): applies incoming operations under --dest with atomic
-// temp+hash-verify+rename writes. Encryption is cs-stream's job -- put a
-// tunnel-listen in front for anything beyond loopback.
+// temp+hash-verify+rename writes. cs-sync 2.1+ encrypts natively
+// (ChaCha20-Poly1305, keyed from --key) -- no cs-stream tunnel required.
+// --key and --allow-ip are both mandatory (Gea 2026.07.25): an empty key
+// or a missing source-IP allowlist would let an arbitrary host on the LAN
+// attempt a sync.
 func serveCmd(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	dest := fs.String("dest", "", "destination folder on ZFS (required)")
 	listen := fs.String("listen", "127.0.0.1:9010", "listen address")
 	logPath := fs.String("log", "", "log file path")
-	transferKey := fs.String("key", "", "2.0: pre-shared transfer key, must match the sender's --key -- empty accepts any sender (fine on loopback behind a cs-stream tunnel, not otherwise)")
+	transferKey := fs.String("key", "", "REQUIRED: pre-shared transfer key -- also the encryption key, must match the sender's --key exactly")
+	allowIP := fs.String("allow-ip", "", "REQUIRED: only this single source IP may connect (prevents an arbitrary LAN host from syncing)")
+	serviceID := fs.String("service-id", "", "optional: service id for status/loop-detection files under _cfg/sync/<id>.last")
 	fs.Parse(args)
 
 	if *dest == "" {
 		fmt.Fprintln(os.Stderr, "error: --dest is required")
+		os.Exit(2)
+	}
+	if *transferKey == "" {
+		fmt.Fprintln(os.Stderr, "error: --key is required (cs-sync now encrypts natively; empty key is refused)")
+		os.Exit(2)
+	}
+	if *allowIP == "" {
+		fmt.Fprintln(os.Stderr, "error: --allow-ip is required (must name the single sender IP allowed to connect)")
 		os.Exit(2)
 	}
 	dest2, _ := filepath.Abs(*dest)
@@ -618,15 +655,15 @@ func serveCmd(args []string) {
 	acltype, err := zfscheck.CheckAndPrepare(dest2)
 	if err != nil {
 		log.Printf("FATAL: dest precondition check failed: %v", err)
+		writeStatus(*serviceID, fmt.Sprintf("error: dest precondition check failed: %v", err))
 		os.Exit(1)
 	}
 	cleanupTmp(dest2, log)
-	rv := &remote.Receiver{Dest: dest2, AclType: acltype, TransferKey: *transferKey, Version: version, Log: log}
-	if *transferKey == "" {
-		log.Printf("WARN: no --key set -- any sender that can reach %s will be accepted (fine on loopback behind a cs-stream tunnel, not otherwise)", *listen)
-	}
+	writeStatus(*serviceID, fmt.Sprintf("started (%s)", time.Now().Format("2006-01-02 15:04:05")))
+	rv := &remote.Receiver{Dest: dest2, AclType: acltype, TransferKey: *transferKey, AllowIP: *allowIP, Version: version, Log: log}
 	if err := rv.Serve(*listen); err != nil {
 		log.Printf("FATAL: %v", err)
+		writeStatus(*serviceID, fmt.Sprintf("error: %v", err))
 		os.Exit(1)
 	}
 }

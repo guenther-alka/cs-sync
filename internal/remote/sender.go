@@ -82,7 +82,7 @@ func (s *Sender) connect() error {
 	if err != nil {
 		return err
 	}
-	cn := wire.New(c)
+	cn := wire.NewEncrypted(c, s.TransferKey)
 	t, p, err := cn.Recv()
 	if err != nil || t != wire.TWelcome {
 		c.Close()
