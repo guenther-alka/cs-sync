@@ -60,7 +60,7 @@ Full concept and design decisions:
 
 ## Status
 
-**v2.1.1.** Local `primary ↔ secondary` (v1 engine, unchanged) and
+**v2.1.2.** Local `primary ↔ secondary` (v1 engine, unchanged) and
 `primary → backup` (local one-way, and remote over the network, natively
 encrypted) are both implemented and live-deployed to the official
 napp-it CS menu path
@@ -73,6 +73,53 @@ e.g. an unmounted source dataset masquerading as an empty folder). See
 `cs-sync-2.0-design.info` sections 3-6 for the full rationale.
 
 ### Changelog
+
+**v2.1.2** (2026-07-28) -- full source audit: 4 real bugs fixed.
+
+A systematic manual read of all 34 Go files (not triggered by a live-test
+failure this time) found and fixed four issues:
+
+1. **zfscheck.go**: the documented "Windows always nfs4, regardless of
+   filesystem" policy was only enforced on the no-dataset-found and
+   GetProp-error paths. If `zfs get acltype` on a real OpenZFS-on-Windows
+   dataset *succeeded* and returned `posixacl` (the same compat-label
+   pattern already confirmed live for FreeBSD in this file) or `off`,
+   `CheckAndPrepare` would return `"posix"` or a hard error for a Windows
+   host -- and Windows has no real posix ACL implementation (hard-error
+   stub), so ACL sync would silently and completely break. Fixed: Windows
+   now skips the live acltype read entirely, like illumos/solaris/freebsd.
+2. **`watch_eventport_illumossolaris.go`**: the illumos/Solaris Event-Ports
+   watcher had **no debounce timer at all**, unlike every fsnotify-based
+   watcher -- every single fired FEN association triggered an immediate
+   full three-way reconcile pass. A burst of filesystem activity on
+   illumos (this project's flagship platform) caused far more full-tree
+   rescans than intended. Fixed: added a debounce loop identical in
+   structure to the fsnotify watcher's. Live-verified on OmniOS: a 30-file
+   burst now settles into a single pass ("30 ops") instead of ~30 separate
+   passes.
+3. **watch package (both watchers)**: `emit()`'s coalescing could silently
+   drop a `safety-net`/`sighup` reason in favor of an already-queued
+   `event` -- the periodic existing-folder ACL re-sync is gated on that
+   exact reason string, so an unlucky timing coincidence could skip it for
+   a full `--rescan` cycle (default 24h). Fixed: `emit()` now drains and
+   compares before dropping, never letting `event` downgrade a pending
+   `safety-net`/`sighup`/`start`. Verified with a concurrency + race-
+   detector test (200 concurrent goroutines).
+4. **`remote/receiver.go` `writeAclCSV`**: used a fixed temp filename --
+   the same bug class fixed for the local state files in v2.1.1, but here
+   on the receiver (`cs-sync serve`) side, which has no relationship to
+   the sender-side pass lock. PID-suffixed for consistency.
+
+Also clarified (no functional change) a misleading "bootstrap-only"
+comment in `apply/executor.go`'s `mkdirWithACL` -- the routine
+secondary→primary mkdir case is harmless: `aclinherit=passthrough` (set
+on every dataset) makes ZFS itself apply the parent's inheritable ACEs at
+`mkdir()` time, at the kernel level, independent of cs-sync's own ACL
+apply call.
+
+Verified: `go build`/`go vet`/`staticcheck` all clean; cross-compiled
+clean for all 8 release platforms; live regression-tested on all 4
+reachable members (see **OS test results** below).
 
 **v2.1.1** (2026-07-28) -- illumos cross-process race condition fix.
 
@@ -125,27 +172,20 @@ relationships detect sync-chain loops (a service's own marker returning
 to its primary via a -> b -> ... -> a) and stop with a clear error
 instead of looping forever.
 
-### OS test results (v2.1.1)
+### OS test results (v2.1.2)
 
 Live-tested across the full napp-it CS cluster platform matrix. All
-platforms confirmed on **v2.1.1** via `cs-sync version`.
+platforms confirmed on **v2.1.2** via `cs-sync version`.
 
-| Host | OS | Solo (single relationship) | Parallel bidir + local backup (shared `--primary`) |
-|---|---|---|---|
-| my-w11 | Windows | clean | not applicable (single-host dev/test only) |
-| .112 | Linux (Proxmox) | clean | clean (prior v2.1.0 round) |
-| .191 | FreeBSD | clean | clean (prior v2.1.0 round) |
-| .196 | macOS | clean | clean (prior v2.1.0 round) |
-| **.189** | **OmniOS/illumos** | clean | **clean -- was the original failure case, now fixed** |
+| Host | OS | Regression test after v2.1.2 fixes |
+|---|---|---|
+| my-w11 | Windows | version confirmed; local dev/test only |
+| .112 | Linux (Proxmox, posixacl) | clean, no errors |
+| .191 | FreeBSD (nfsv4) | clean, no errors |
+| .196 | macOS (no ZFS, acltype=none) | clean, no errors |
+| **.189** | **OmniOS/illumos (nfs4)** | clean; **debounce fix confirmed**: 30-file burst settled into 1 reconcile pass ("30 ops") instead of ~30 separate passes |
 
-The OmniOS re-test is the one that matters: same parallel `bidir` +
-local-path `oneway` "Backup" pattern that previously produced complete
-silent data loss now produces byte-for-byte consistent results across
-primary/secondary/backup on every pass, confirmed both immediately after
-a burst of writes and after a full 10-second run, with zero
-WARN/ERROR/FATAL log lines.
-
-Known gaps (unchanged from v2.0/v2.1.0):
+Known gaps (unchanged from v2.0/v2.1.1):
 
 - Echo suppression (own writes triggering extra reconcile passes) is
   not implemented -- harmless (idempotent, converges to "no changes")
