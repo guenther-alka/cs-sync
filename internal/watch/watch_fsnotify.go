@@ -123,11 +123,46 @@ func (fw *fsWatcher) safetyNetLoop(interval time.Duration) {
 	}
 }
 
+// emit sends reason on out, coalescing if a signal is already pending.
+//
+// BUG FIX 2026.07.28 (audit finding): a plain "send or drop" coalesce
+// (the previous implementation) can silently drop a "safety-net"/"sighup"
+// reason in favor of an already-queued "event" -- main.go's doPass()
+// gates the periodic existing-folder ACL re-sync specifically on
+// reason=="safety-net"||"sighup" (deliberately NOT run on every fast
+// event pass, see that function's doc comment), so losing the distinct
+// reason string could skip that re-sync for up to a full --rescan
+// interval (default 24h) if an "event" happened to be sitting unconsumed
+// in the channel at the exact moment the safety-net ticker fired. Fix:
+// when the channel is full, drain-and-compare instead of dropping --
+// keep whichever reason is more significant ("event" never overwrites a
+// pending safety-net/sighup/start; anything else may upgrade a pending
+// "event"). Identical logic in watch_eventport_illumossolaris.go.
 func (fw *fsWatcher) emit(reason string) {
 	select {
 	case fw.out <- reason:
+		return
 	default:
-		// a signal is already pending -- coalesce, no need to queue more
+	}
+	select {
+	case old := <-fw.out:
+		keep := reason
+		if old != "event" && reason == "event" {
+			keep = old // don't downgrade a more significant pending reason
+		}
+		select {
+		case fw.out <- keep:
+		default:
+			select {
+			case fw.out <- keep:
+			default:
+			}
+		}
+	default:
+		select {
+		case fw.out <- reason:
+		default:
+		}
 	}
 }
 

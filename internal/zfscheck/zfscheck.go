@@ -114,7 +114,27 @@ func SetProp(dataset, prop, value string) error {
 // macOS: if ZFS not installed, returns "none" (APFS/HFS+ file sync only).
 // If OpenZFS for Mac is installed and path is on ZFS, normal nfs4 applies.
 func CheckAndPrepare(folderPath string) (string, error) {
-	isIllumos := runtime.GOOS == "illumos" || runtime.GOOS == "solaris" || runtime.GOOS == "freebsd"
+	// BUG FIX 2026.07.28 (audit finding): Windows was only forced to
+	// "nfs4" in the "no dataset found" and "GetProp errored" branches --
+	// if `zfs get acltype` on a real OpenZFS-on-Windows dataset SUCCEEDED
+	// and returned "posixacl" (a plausible compat label: this exact
+	// pattern is already documented and confirmed live for FreeBSD a few
+	// lines below, where OpenZFS reports "posixacl" for what is actually
+	// NFSv4), CheckAndPrepare would set acltype="posix" for a Windows
+	// host. But acl_posix_other.go (built for any non-linux GOOS,
+	// including windows) has NO real implementation -- it unconditionally
+	// returns "posix acltype not supported on this OS". Every single ACL
+	// read/apply on that host would then hard-fail, silently breaking
+	// ACL sync (folders just keep default/parent-inherited permissions,
+	// logged as repeated WARN lines, never fixed) despite the package's
+	// own doc comment promising "Windows: always nfs4, regardless of
+	// filesystem". Same risk exists for acltype=off (previously a hard
+	// FATAL precondition failure on Windows) or any other unexpected
+	// string a given OpenZFS-on-Windows build might report. Fix: treat
+	// windows exactly like illumos/solaris/freebsd -- skip the live
+	// GetProp("acltype") call entirely and hardcode "nfs4" per the
+	// function's own documented, unconditional design intent.
+	skipLiveAcltypeCheck := runtime.GOOS == "illumos" || runtime.GOOS == "solaris" || runtime.GOOS == "freebsd" || runtime.GOOS == "windows"
 
 	ds, err := ParentDataset(folderPath)
 	if err != nil {
@@ -139,25 +159,20 @@ func CheckAndPrepare(folderPath string) (string, error) {
 	}
 
 	acltype := "nfs4"
-	if !isIllumos {
+	if !skipLiveAcltypeCheck {
 		raw, err := GetProp(ds.Name, "acltype")
 		if err != nil {
-			if runtime.GOOS == "windows" {
-				acltype = "nfs4"
-			} else {
-				return "", err
-			}
-		} else {
-			switch raw {
-			case "off":
-				return "", fmt.Errorf("dataset %s has acltype=off -- cs-sync requires posixacl or nfsv4 (see cs-sync.info section 2)", ds.Name)
-			case "posixacl", "posix":
-				acltype = "posix"
-			case "nfsv4", "nfs4":
-				acltype = "nfs4"
-			default:
-				return "", fmt.Errorf("dataset %s has unexpected acltype=%s", ds.Name, raw)
-			}
+			return "", err
+		}
+		switch raw {
+		case "off":
+			return "", fmt.Errorf("dataset %s has acltype=off -- cs-sync requires posixacl or nfsv4 (see cs-sync.info section 2)", ds.Name)
+		case "posixacl", "posix":
+			acltype = "posix"
+		case "nfsv4", "nfs4":
+			acltype = "nfs4"
+		default:
+			return "", fmt.Errorf("dataset %s has unexpected acltype=%s", ds.Name, raw)
 		}
 	}
 

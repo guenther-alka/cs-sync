@@ -111,8 +111,26 @@ func mkdirWithACL(dstRoot, relPath string, roots Roots, log Logf) error {
 	}
 
 	if dstRoot == roots.Primary {
-		// bootstrap case (section 6b): source is acl.csv, not a live
-		// primary-side parent read (primary may still be empty).
+		// CLARIFIED 2026.07.28 (audit finding, confirmed benign by Gea):
+		// this branch fires any time a folder is newly created ON
+		// PRIMARY -- not only the rare section 6b bootstrap case (primary
+		// starts completely empty, secondary pre-filled via RustFS
+		// replication) but also the ROUTINE ongoing-bidir case where a
+		// folder is created first on SECONDARY and propagates to primary
+		// (reconcile.go: "!inB && !inP && inS" and "bp && !bs"). In that
+		// routine case PrimaryBootstrapACL (populated once at startup)
+		// normally has no entry for a folder created later, so this
+		// silently applies NO ACL beyond os.MkdirAll's own default mode --
+		// confirmed acceptable rather than a gap: aclinherit=passthrough
+		// (set by zfscheck.CheckAndPrepare on every dataset) makes ZFS
+		// itself apply the parent folder's inheritable ACEs at mkdir()
+		// time, at the kernel level, independent of whether cs-sync also
+		// calls acl.Apply -- so the new primary folder still inherits
+		// correctly from its actual parent on primary. This matters if
+		// secondary has NO native ACL of its own to contribute anyway
+		// (e.g. an S3-backed secondary), and self-heals even in the rarer
+		// case of a real native-ACL secondary via the periodic existing-
+		// folder ACL re-sync (main.go, safety-net/sighup passes).
 		if text, ok := roots.PrimaryBootstrapACL[relPath]; ok && text != "" {
 			if err := acl.Apply(dst, roots.AclType, text); err != nil {
 				log("WARN: could not apply bootstrap ACL to %s: %v", relPath, err)

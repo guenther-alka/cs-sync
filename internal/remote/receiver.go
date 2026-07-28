@@ -374,12 +374,23 @@ func (rv *Receiver) mkdir(op wire.Op) error {
 	return nil
 }
 
+// writeAclCSV writes the received acl.csv blob atomically.
+//
+// BUG FIX 2026.07.28 (audit finding): used a FIXED tmp filename
+// (state.AclCsvName+".tmp") -- the exact same bug class fixed for the
+// local state files in v2.1.1 (see internal/lock package doc), but here
+// on the RECEIVER side, which is a wholly separate process/invocation
+// ("cs-sync serve") with no relationship to the sender-side pass lock.
+// Two "cs-sync serve" processes both pointed at the same --dest
+// (a misconfiguration, but not one the code prevented) would race on
+// this exact tmp file. PID-suffixed for consistency with every other
+// tmp-file writer in the codebase.
 func (rv *Receiver) writeAclCSV(data []byte) error {
 	dir, err := state.Dir(rv.Dest)
 	if err != nil {
 		return err
 	}
-	tmp := filepath.Join(dir, state.AclCsvName+".tmp")
+	tmp := filepath.Join(dir, fmt.Sprintf("%s.tmp.%d", state.AclCsvName, os.Getpid()))
 	if err := os.WriteFile(tmp, data, 0600); err != nil {
 		return err
 	}

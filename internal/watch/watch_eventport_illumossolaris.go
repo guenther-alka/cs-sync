@@ -32,6 +32,12 @@ type portWatcher struct {
 	out    chan string
 	closed chan struct{}
 
+	// raw is fed by pollLoop on every fired event; debounceLoop coalesces
+	// bursts of raw signals into a single "event" emission after the
+	// configured debounce window has passed with no further signals --
+	// see BUG FIX 2026.07.28 comment on debounceLoop below.
+	raw chan struct{}
+
 	mu      sync.Mutex
 	watched map[string]bool
 }
@@ -54,12 +60,14 @@ func New(roots []string, opt Options) (Watcher, error) {
 		out:     make(chan string, 1),
 		closed:  make(chan struct{}),
 		watched: map[string]bool{},
+		raw:     make(chan struct{}, 1),
 	}
 	for _, root := range roots {
 		pw.addRecursive(root)
 	}
 
-	go pw.eventLoop()
+	go pw.pollLoop()
+	go pw.debounceLoop(opt.Debounce)
 	go pw.safetyNetLoop(opt.SafetyNet)
 	go func() { pw.out <- "start" }() // sync once at startup, section 6
 
@@ -99,7 +107,12 @@ func (pw *portWatcher) associate(path string) {
 	pw.mu.Unlock()
 }
 
-func (pw *portWatcher) eventLoop() {
+// pollLoop blocks on port_get (via ep.GetOne) and re-associates each fired
+// directory, feeding a raw signal to debounceLoop for every event. The
+// actual filesystem re-walk (addRecursive) happens here, off the
+// debounce-timer-management loop, so a burst of many events doesn't
+// delay the timer bookkeeping.
+func (pw *portWatcher) pollLoop() {
 	for {
 		pe, err := pw.ep.GetOne(nil) // blocks until an event or Close()
 		if err != nil {
@@ -119,7 +132,61 @@ func (pw *portWatcher) eventLoop() {
 		// re-associate the fired directory and pick up any new subdirs
 		pw.addRecursive(path)
 
-		pw.emit("event")
+		select {
+		case pw.raw <- struct{}{}:
+		default:
+			// a raw signal is already pending -- debounceLoop hasn't
+			// consumed it yet, no need to queue more (it just resets a
+			// timer regardless of how many events arrived).
+		}
+	}
+}
+
+// debounceLoop coalesces bursts of raw fire signals into one "event"
+// emission per debounce window, mirroring watch_fsnotify.go's
+// debounceLoop exactly.
+//
+// BUG FIX 2026.07.28 (audit finding): this loop did not exist before --
+// the illumos/Solaris watcher called pw.emit("event") directly from
+// eventLoop on EVERY single fired FEN association, with no debounce
+// timer at all, unlike every other platform (fsnotify-based watchers all
+// share watch_fsnotify.go's debounceLoop). In practice this meant a bulk
+// operation generating many filesystem events in quick succession (large
+// copy, archive extraction, etc.) triggered a SEPARATE full three-way
+// reconcile pass (a full recursive scan of both primary and secondary
+// trees) for close to EVERY individual event, instead of settling into a
+// small number of passes after the burst quiets down -- exactly the
+// "excessive rescan cost" the debounce window exists to avoid per
+// cs-sync.info section 7, and a real regression specifically on illumos/
+// Solaris, this project's flagship reference platform.
+func (pw *portWatcher) debounceLoop(debounce time.Duration) {
+	var timer *time.Timer
+	reset := func() {
+		if timer == nil {
+			timer = time.NewTimer(debounce)
+			return
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(debounce)
+	}
+	var timerC <-chan time.Time
+
+	for {
+		select {
+		case <-pw.raw:
+			reset()
+			timerC = timer.C
+		case <-timerC:
+			pw.emit("event")
+			timerC = nil
+		case <-pw.closed:
+			return
+		}
 	}
 }
 
@@ -136,11 +203,52 @@ func (pw *portWatcher) safetyNetLoop(interval time.Duration) {
 	}
 }
 
+// emit sends reason on out, coalescing if a signal is already pending.
+//
+// BUG FIX 2026.07.28 (audit finding): a plain "send or drop" coalesce
+// (the previous implementation) can silently drop a "safety-net"/"sighup"
+// reason in favor of an already-queued "event" -- main.go's doPass()
+// gates the periodic existing-folder ACL re-sync specifically on
+// reason=="safety-net"||"sighup" (deliberately NOT run on every fast
+// event pass, see that function's doc comment), so losing the distinct
+// reason string could skip that re-sync for up to a full --rescan
+// interval (default 24h) if an "event" happened to be sitting unconsumed
+// in the channel at the exact moment the safety-net ticker fired. Fix:
+// when the channel is full, drain-and-compare instead of dropping --
+// keep whichever reason is more significant ("event" never overwrites a
+// pending safety-net/sighup/start; anything else may upgrade a pending
+// "event").
 func (pw *portWatcher) emit(reason string) {
 	select {
 	case pw.out <- reason:
+		return
 	default:
-		// a signal is already pending -- coalesce, matches the fsnotify watcher
+	}
+	select {
+	case old := <-pw.out:
+		keep := reason
+		if old != "event" && reason == "event" {
+			keep = old // don't downgrade a more significant pending reason
+		}
+		select {
+		case pw.out <- keep:
+		default:
+			// consumer drained it between our two selects -- try once more,
+			// non-blocking; if that also fails, drop rather than risk
+			// blocking emit() forever (matches the original best-effort
+			// coalescing contract).
+			select {
+			case pw.out <- keep:
+			default:
+			}
+		}
+	default:
+		// consumer drained the pending value between our two selects --
+		// the channel is empty now, so just send directly.
+		select {
+		case pw.out <- reason:
+		default:
+		}
 	}
 }
 
