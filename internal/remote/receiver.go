@@ -16,6 +16,7 @@ import (
 
 	"github.com/guenther-alka/cs-sync/internal/acl"
 	"github.com/guenther-alka/cs-sync/internal/logging"
+	"github.com/guenther-alka/cs-sync/internal/loopmark"
 	"github.com/guenther-alka/cs-sync/internal/state"
 	"github.com/guenther-alka/cs-sync/internal/wire"
 )
@@ -144,6 +145,15 @@ func (rv *Receiver) handle(c net.Conn) {
 		}
 		switch t {
 		case wire.TPing:
+			ack(nil)
+
+		case wire.TLoopMarker:
+			var lm wire.LoopMarker
+			if err := wire.Decode(p, &lm); err != nil {
+				ack(err)
+				continue
+			}
+			loopmark.Write(rv.Dest, lm.ServiceID, lm.Stamp)
 			ack(nil)
 
 		case wire.TMkdir:

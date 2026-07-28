@@ -190,15 +190,17 @@ func runCmd(args []string, apply_ bool) {
 			os.Exit(1)
 		}
 		sender = &remote.Sender{
-			Primary:  primaryPath2,
-			Addr:     *remoteAddr,
-			StateDir: filepath.Join(sd, "remote_"+name),
+			Primary:     primaryPath2,
+			Addr:        *remoteAddr,
+			StateDir:    filepath.Join(sd, "remote_"+name),
 			AclType:     acltype,
 			TransferKey: *transferKey,
 			Budget:      guard.Budget{MaxCount: *maxDelCount, MaxPercent: *maxDelPercent},
 			Limiter:     remote.NewLimiter(*bwlimit),
 			Version:     version,
 			Log:         log,
+			ServiceID:   *serviceID,
+			LoopStamp:   loopStamp,
 		}
 		if err := sender.Init(); err != nil {
 			log.Printf("FATAL: remote state init: %v", err)
@@ -218,7 +220,7 @@ func runCmd(args []string, apply_ bool) {
 	}
 
 	doPass := func(reason string) {
-		if *serviceID != "" && *mode == "oneway" && checkLoopMarker(primaryPath2, *serviceID, loopStamp) {
+		if *serviceID != "" && (*mode == "oneway" || *remoteAddr != "") && checkLoopMarker(primaryPath2, *serviceID, loopStamp) {
 			log.Printf("FATAL: loop detected -- this service's own marker returned to its primary via a sync chain (a -> b -> ... -> a); stopping")
 			writeStatus(*serviceID, "error: loop detected")
 			os.Exit(1)

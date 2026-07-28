@@ -42,6 +42,14 @@ type Sender struct {
 	Version     string
 	Log         *logging.Logger
 
+	// ServiceID/LoopStamp: if ServiceID is non-empty, connect() pushes a
+	// wire.TLoopMarker to the receiver on every (re)connect (cheap, one
+	// tiny frame), so the remote side's .backupdata/loop/<ServiceID>.loop
+	// stays populated for cross-host loop detection (statusfile.go) even
+	// across a receiver restart that lost its state.
+	ServiceID string
+	LoopStamp string
+
 	conn     *wire.Conn
 	peer     wire.Welcome
 	sameOS   bool
@@ -130,6 +138,12 @@ func (s *Sender) connect() error {
 	s.sameOS = s.peer.OS == runtime.GOOS && s.peer.AclType == s.AclType
 	s.Log.Printf("remote connected: %s (cs-sync %s, os=%s, acltype=%s, nativeACL=%v)",
 		s.Addr, s.peer.SyncVersion, s.peer.OS, s.peer.AclType, s.sameOS)
+
+	if s.ServiceID != "" {
+		if err := cn.Send(wire.TLoopMarker, wire.LoopMarker{ServiceID: s.ServiceID, Stamp: s.LoopStamp}); err != nil {
+			s.Log.Printf("WARN: could not send loop marker: %v", err)
+		}
+	}
 	return nil
 }
 

@@ -8,23 +8,24 @@
 // condition) -- the Perl menu tails this file for the status column
 // instead of parsing the full cs-sync.log.
 //
-// LOOP DETECTION (unidir chains only, v1): a marker file
-// <secondary>/.cs-sync-chain/<serviceid>.loop is written ONCE at service
-// startup, containing a random per-process-run stamp. This marker is a
-// regular file inside the synced tree, so if this secondary is itself
-// configured as the PRIMARY of another (or the same) unidir service
-// further down a chain (a -> b -> c -> d -> a), it keeps propagating
-// forward with every hop. Each service checks, at the start of every
-// pass, whether ITS OWN primary now contains a marker with ITS OWN stamp
-// -- which can only happen if that exact marker travelled all the way
-// around a cycle and landed back at its origin. The marker is written
-// into secondary ONLY (never into primary directly), so a healthy
-// acyclic setup never produces a false positive: primary is purely a
-// check location for this service, never a write target.
+// LOOP DETECTION (local unidir AND --remote): a marker file
+// <secondary-or-remote-dest>/.backupdata/loop/<serviceid>.loop is written
+// ONCE at service startup, containing a random per-process-run stamp.
+// The marker is NOT part of the synced user-data tree -- it lives in
+// .backupdata (the existing state directory, already excluded from the
+// regular file scan/reconcile) and is written directly:
+//   - local unidir: written straight to <secondary>/.backupdata/loop/
+//     (no sync-engine round trip needed -- secondary and the next hop's
+//     primary are literally the same directory on disk).
+//   - --remote: pushed once per connect via a dedicated TLoopMarker wire
+//     frame (internal/wire) right after the handshake, so it arrives
+//     immediately rather than waiting for a full reconcile pass; the
+//     receiver writes it to <dest>/.backupdata/loop/ the same way.
 //
-// Not implemented in v1: propagating the marker over the --remote wire
-// leg (would need a dedicated wire message); cross-host chains are not
-// yet covered by loop detection. Documented limitation, TODO for v2.1.
+// Each service only ever checks its OWN primary for its OWN
+// serviceID+stamp, so a marker only ever matches if it travelled all the
+// way around a genuine cycle (a -> b -> c -> d -> a) and landed back at
+// its origin. Cross-host chains are covered via wire.TLoopMarker.
 package main
 
 import (
@@ -34,8 +35,14 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/guenther-alka/cs-sync/internal/loopmark"
 	"github.com/guenther-alka/cs-sync/internal/reconcile"
 )
+
+// Loop-detection is implemented in internal/loopmark (shared by main and
+// internal/remote, since the receiver also needs to write markers on
+// TLoopMarker receipt). newLoopStamp/writeLoopMarker/checkLoopMarker below
+// are thin wrappers kept for call-site readability in main.go.
 
 // syncCfgDir returns the fixed napp-it CS config directory for sync
 // service status files: /opt/csweb-gui/_cfg/sync on Unix,
@@ -64,42 +71,12 @@ func writeStatus(serviceID, line string) {
 	_ = os.WriteFile(filepath.Join(dir, serviceID+".last"), []byte(content), 0644)
 }
 
-const loopMarkerDir = ".cs-sync-chain"
-
-// newLoopStamp generates this process run's unique loop-detection stamp.
-func newLoopStamp() string {
-	return fmt.Sprintf("%d", time.Now().UnixNano())
+func newLoopStamp() string { return loopmark.NewStamp() }
+func writeLoopMarker(targetRoot, serviceID, stamp string) {
+	loopmark.Write(targetRoot, serviceID, stamp)
 }
-
-// writeLoopMarker drops this service's marker (own stamp) into the
-// downstream target -- secondary for a local unidir pair. Never call this
-// with primaryPath: the marker must only ever arrive at primary via an
-// actual incoming sync, not via our own direct write, or every service
-// would trivially "detect" a loop against itself.
-func writeLoopMarker(secondaryRoot, serviceID, stamp string) {
-	if serviceID == "" || secondaryRoot == "" {
-		return
-	}
-	dir := filepath.Join(secondaryRoot, loopMarkerDir)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return
-	}
-	_ = os.WriteFile(filepath.Join(dir, serviceID+".loop"), []byte(stamp+"\n"), 0644)
-}
-
-// checkLoopMarker reports whether THIS service's own marker (matching
-// stamp) has appeared in its own primary -- meaning it travelled forward
-// through a chain of one or more other unidir services and looped back.
 func checkLoopMarker(primaryRoot, serviceID, stamp string) bool {
-	if serviceID == "" || primaryRoot == "" {
-		return false
-	}
-	data, err := os.ReadFile(filepath.Join(primaryRoot, loopMarkerDir, serviceID+".loop"))
-	if err != nil {
-		return false
-	}
-	found := string(data)
-	return len(found) >= len(stamp) && found[:len(stamp)] == stamp
+	return loopmark.Check(primaryRoot, serviceID, stamp)
 }
 
 // writeLastFileStatus writes the last file-copy op from a completed pass

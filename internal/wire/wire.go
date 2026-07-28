@@ -1,15 +1,14 @@
 // Package wire implements the framed cs-sync 2.0 network protocol
-// (cs-sync-2.0-design.info section 6). Every frame is encrypted with
-// ChaCha20-Poly1305 (see crypto.go) -- cs-sync 2.1+ no longer depends on
-// an external cs-stream tunnel for confidentiality (Gea 2026.07.25).
+// (cs-sync-2.0-design.info section 6).
 //
 // Frame layout: 1 byte type, 4 bytes big-endian payload length, payload
-// (gob-encoded message struct, sealed if encryption is enabled). CHUNK-
-// AWARE FROM DAY 1 (section 6): a file transfer is a FileBegin followed
-// by one FileData frame PER BLOCK, each carrying (offset, data, per-block
-// hash) -- v2.0 always sends all blocks sequentially and the receiver
-// writes them strictly in order (trivially correct); v2.1 delta only adds
-// a skip negotiation, the frame format itself stays unchanged.
+// (gob-encoded message struct, sealed with ChaCha20-Poly1305 when the
+// Conn was created via NewEncrypted -- see crypto.go). CHUNK-AWARE FROM
+// DAY 1 (section 6): a file transfer is a FileBegin followed by one
+// FileData frame PER BLOCK, each carrying (offset, data, per-block hash)
+// -- v2.0 always sends all blocks sequentially and the receiver writes
+// them strictly in order (trivially correct); v2.1 delta only adds a
+// skip negotiation, the frame format itself stays unchanged.
 package wire
 
 import (
@@ -33,19 +32,20 @@ const BlockSize = 4 * 1024 * 1024
 
 // Frame types.
 const (
-	TWelcome   byte = 1 // both directions: handshake (receiver sends first)
-	TMkdir     byte = 2 // sender -> receiver
-	TRename    byte = 3
-	TDelete    byte = 4 // file or symlink
-	TRmdir     byte = 5
-	TSymlink   byte = 6
-	TFileBegin byte = 7
-	TFileData  byte = 8
-	TFileEnd   byte = 9
-	TFolderACL byte = 10 // native ACL text, only when same OS (section 8/14)
-	TAclCSV    byte = 11 // portable acl.csv blob, ALWAYS sent (section 14)
-	TAck       byte = 12 // receiver -> sender, per operation
-	TPing      byte = 13 // keepalive, receiver answers with TAck
+	TWelcome    byte = 1 // both directions: handshake (receiver sends first)
+	TMkdir      byte = 2 // sender -> receiver
+	TRename     byte = 3
+	TDelete     byte = 4 // file or symlink
+	TRmdir      byte = 5
+	TSymlink    byte = 6
+	TFileBegin  byte = 7
+	TFileData   byte = 8
+	TFileEnd    byte = 9
+	TFolderACL  byte = 10 // native ACL text, only when same OS (section 8/14)
+	TAclCSV     byte = 11 // portable acl.csv blob, ALWAYS sent (section 14)
+	TAck        byte = 12 // receiver -> sender, per operation
+	TPing       byte = 13 // keepalive, receiver answers with TAck
+	TLoopMarker byte = 14 // sender -> receiver, once per connect: loop-detection marker (statusfile.go)
 )
 
 // Welcome is the handshake message, sent by both sides on connect
@@ -60,13 +60,11 @@ type Welcome struct {
 	// reused as-is -- both members already have the
 	// identical value via existing group membership,
 	// no separate secret to distribute. This is a
-	// PRE-SHARED-KEY CHECK in addition to the encryption
-	// itself (a mismatched key already fails to decrypt
-	// the very first frame -- this field is a friendlier,
-	// explicit error path for the case where decryption
-	// somehow succeeds despite different keys, which
-	// should not happen with ChaCha20-Poly1305 but costs
-	// nothing to check).
+	// PRE-SHARED-KEY CHECK; the connection itself is
+	// ALSO encrypted with a key derived from this same
+	// value (see crypto.go / NewEncrypted) -- cs-sync no
+	// longer depends on an external cs-stream tunnel for
+	// confidentiality.
 }
 
 // Op carries mkdir/rename/delete/rmdir/symlink metadata.
@@ -118,6 +116,15 @@ type AclCSV struct {
 type Ack struct {
 	OK  bool
 	Err string
+}
+
+// LoopMarker carries this sender's loop-detection marker (statusfile.go)
+// to the receiver, which writes it to <dest>/.backupdata/loop/<ServiceID>.loop.
+// Sent once right after a successful handshake (and on every reconnect),
+// not per-pass -- the marker only needs to exist, not be refreshed.
+type LoopMarker struct {
+	ServiceID string
+	Stamp     string
 }
 
 // Conn wraps a net.Conn with buffered framed gob I/O. If aead is non-nil,
