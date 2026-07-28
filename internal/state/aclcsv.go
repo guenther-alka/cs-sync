@@ -2,6 +2,7 @@ package state
 
 import (
 	"encoding/csv"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -25,13 +26,16 @@ const AclCsvName = "cs-sync-acl.csv"
 // children are). The root ACL is the default inheritance source for any
 // new top-level file/folder and must be captured/restored just like any
 // other folder's ACL (Gea, 2026.07.23).
+// LOCKING NOTE (2026.07.28 illumos race fix): covered by the same
+// doPass()-level lock as state.Save (see store.go Load's doc comment).
+// PID suffix on the tmp name is belt-and-suspenders, same rationale.
 func WriteACLCSV(root string, tree model.Tree, acltype string, rootACL string) error {
 	dir, err := Dir(root)
 	if err != nil {
 		return err
 	}
 	final := filepath.Join(dir, AclCsvName)
-	tmp := final + ".tmp"
+	tmp := fmt.Sprintf("%s.tmp.%d", final, os.Getpid())
 
 	f, err := os.Create(tmp)
 	if err != nil {
@@ -122,7 +126,7 @@ func MirrorACLCSV(primaryRoot, secondaryRoot string) error {
 		return err
 	}
 	dst := filepath.Join(dstDir, AclCsvName)
-	tmp := dst + ".tmp"
+	tmp := fmt.Sprintf("%s.tmp.%d", dst, os.Getpid())
 	if err := os.WriteFile(tmp, data, 0644); err != nil {
 		return err
 	}

@@ -23,6 +23,13 @@ func Dir(root string) (string, error) {
 
 // Load reads the baseline state from primaryRoot/.backupdata/cs-sync.state.
 // Missing or unreadable file is treated as "first run" (empty state, no error).
+//
+// NOTE ON LOCKING (2026.07.28 illumos race fix, see internal/lock package
+// doc): this function does NOT itself take the cross-process pass lock --
+// the whole load-scan-reconcile-apply-save critical section in main.go's
+// doPass() must be covered by ONE lock.Acquire/Unlock pair, otherwise a
+// second process could still interleave between this Load and the later
+// Save with a stale baseline. See lock.Acquire call site in main.go.
 func Load(primaryRoot string) (*model.State, error) {
 	dir, err := Dir(primaryRoot)
 	if err != nil {
@@ -49,13 +56,18 @@ func Load(primaryRoot string) (*model.State, error) {
 }
 
 // Save writes the baseline atomically: write to a temp file, fsync, rename.
+//
+// PID-UNIQUE TMP NAME (2026.07.28 illumos race fix): belt-and-suspenders
+// alongside the doPass()-level lock (see Load's doc comment) -- even if
+// two processes somehow entered this function concurrently, they can no
+// longer collide on the exact same tmp filename.
 func Save(primaryRoot string, st *model.State) error {
 	dir, err := Dir(primaryRoot)
 	if err != nil {
 		return err
 	}
 	final := filepath.Join(dir, FileName)
-	tmp := final + ".tmp"
+	tmp := fmt.Sprintf("%s.tmp.%d", final, os.Getpid())
 
 	f, err := os.Create(tmp)
 	if err != nil {

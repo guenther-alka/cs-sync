@@ -13,6 +13,7 @@ import (
 	"github.com/guenther-alka/cs-sync/internal/acl"
 	"github.com/guenther-alka/cs-sync/internal/apply"
 	"github.com/guenther-alka/cs-sync/internal/guard"
+	"github.com/guenther-alka/cs-sync/internal/lock"
 	"github.com/guenther-alka/cs-sync/internal/logging"
 	"github.com/guenther-alka/cs-sync/internal/model"
 	"github.com/guenther-alka/cs-sync/internal/reconcile"
@@ -225,6 +226,31 @@ func runCmd(args []string, apply_ bool) {
 			writeStatus(*serviceID, "error: loop detected")
 			os.Exit(1)
 		}
+
+		// CROSS-PROCESS PASS LOCK (2026.07.28 illumos race fix, see
+		// internal/lock package doc and cs-sync-2.0-design.info section
+		// 17 "CRITICAL FINDING: illumos race condition"). Held for the
+		// ENTIRE load-scan-reconcile-apply-save critical section, not just
+		// the individual state.Load/state.Save calls -- a second cs-sync
+		// process sharing this same --primary path (the bidir + local-
+		// path-"Backup" pattern spawned by action.pl's _cssync_svc_start)
+		// must not run its own pass concurrently, or it would reconcile
+		// against a baseline that is about to be superseded, corrupting
+		// whichever Save() loses the race. If a second process is mid-pass
+		// this call blocks (with a bounded stale-lock steal) rather than
+		// interleaving.
+		primaryDir, err := state.Dir(primaryPath2)
+		if err != nil {
+			log.Printf("ERROR: %v", err)
+			return
+		}
+		passLock, err := lock.Acquire(primaryDir)
+		if err != nil {
+			log.Printf("ERROR acquiring pass lock: %v", err)
+			return
+		}
+		defer passLock.Unlock()
+
 		st, err := state.Load(primaryPath2)
 		if err != nil {
 			log.Printf("ERROR loading state: %v", err)
