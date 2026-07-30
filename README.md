@@ -428,8 +428,8 @@ on the backup server's dataset as a complement to realtime sync -- not
 a replacement for it, an independent safety net underneath it. A
 typical schedule:
 
-- snapshot every hour, keep 12
-- snapshot every day, keep 60
+- snapshot every hour, keep 24
+- snapshot every day, keep 30
 - snapshot every week/month, keep as needed
 
 Realtime sync keeps `backup` current to the minute; the autosnap job on
