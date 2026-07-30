@@ -480,6 +480,37 @@ Typical flow:
    identical, so the first pass should settle cleanly with no large
    diff and no risk of tripping the mass-delete guard.
 
+## Standalone setup without napp-it csweb-gui
+
+cs-sync is a self-contained Go binary and does not require a napp-it CS
+installation to run. All state lives under `<primary>/.backupdata/` and
+`<secondary>/.backupdata/` (baseline, `acl.csv`, log, loop markers) --
+relative to whatever folders you pass via `--primary`/`--secondary`/
+`--dest`, anywhere on disk. Everything is driven by CLI flags; there is
+no config file, registry entry, or environment expected from a napp-it
+installation.
+
+ZFS is not required either: `zfscheck` checks the filesystem's
+`acltype`; on a non-ZFS filesystem it falls back to `acltype=none` and
+runs plain file sync (no ACL propagation) instead of refusing to start.
+
+Build and run standalone:
+
+```bash
+git clone https://github.com/guenther-alka/cs-sync.git
+cd cs-sync
+go build -o cs-sync .
+./cs-sync run --primary /path/a --secondary /path/b
+```
+
+**One exception -- and it's opt-in:** `--service-id` is used by the
+napp-it CS job menu to track service status. If (and only if) you pass
+it, cs-sync writes a status line to a **hardcoded** path:
+`/opt/csweb-gui/_cfg/sync/<id>.last` (Windows:
+`C:\opt\csweb-gui\_cfg\sync\<id>.last`) -- the only `/opt` reference in
+the binary. Omit `--service-id` for standalone use (it's optional) and
+this code path is never touched.
+
 ## Warranty
 
 napp-it cs-sync/stream is open source. You may use, analyze, or modify
