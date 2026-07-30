@@ -378,6 +378,43 @@ Not yet implemented: delta transfer for large partially-changed files
 (a changed file is always sent in full -- see **Known gaps** above) and
 a queue disk-space warning threshold for very long outages.
 
+## Behavior on very large folder/file counts (local -> remote)
+
+- **Initial scan** builds one in-RAM tree (a map, one entry per file/
+  dir/symlink -- path, size, mtime, mode, dev+ino). Cost is linear in
+  entry count and kept entirely in RAM, no paging/streaming -- fine for
+  hundreds of thousands of entries, real RAM to plan for at many
+  millions. A single unreadable file/dir does not abort the scan
+  (`SkipDir` on that subtree, everything else continues).
+- **Watching**: a native OS watch handle is registered per directory
+  (inotify/kqueue/FEN/`ReadDirectoryChangesW`). `--max-watched-dirs`
+  (default `0` = unlimited) exists specifically for FreeBSD, where
+  kqueue costs one fd per watched directory -- past the configured
+  count, the watcher **automatically falls back to periodic polling**
+  instead of per-directory handles (suggested value there: `50000`).
+- **Transfer is sequential, one connection, one file at a time** --
+  a deliberate KISS decision (queue-level parallelism across several
+  files was considered, not implemented). Throughput on a huge tree
+  over the network is per-file overhead x file count, not parallelized
+  across multiple streams.
+- **Renames stay cheap at any scale**: a renamed folder with millions
+  of bytes underneath is a single metadata operation (inode-based
+  rename detection), never a re-transfer of its contents -- the
+  biggest practical win for large trees that move around.
+- **Pending queue** is unbounded and coalesced per path by design -- a
+  huge initial backlog (millions of files over a slow/narrow remote
+  link) is the expected case, not a failure mode; it drains over time.
+- **Delete-budget guard** (`--max-delete-count` default `1000`,
+  `--max-delete-percent` default `20%`, OR-combined) can misfire on a
+  genuinely huge tree: a routine bulk cleanup well under 20% of the
+  tree can still trip the absolute count threshold -- raise
+  `--max-delete-count` explicitly for large datasets rather than
+  relying on the default.
+- **24h safety-net rescan** now also does checksum verification (see
+  ACL bootstrap / identity-check section above) -- on a very large tree
+  this means reading every file's content once per rescan cycle, I/O
+  load that scales with total data size, not just file count.
+
 ## License
 
 BSD 2-Clause License -- Copyright (c) 2026 Guenther Alka / napp-it.org.
