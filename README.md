@@ -480,6 +480,14 @@ Typical flow:
    identical, so the first pass should settle cleanly with no large
    diff and no risk of tripping the mass-delete guard.
 
+## Gewährleistung
+
+napp-it cs-sync/stream ist OpenSource. Sie dürfen es kostenlos nutzen,
+analysieren oder verändern. Sie nutzen es "as is" und tragen die
+alleinige Verantwortung für die Nutzung. Diese Hinweise ersetzen nicht
+die BSD 2-Clause Lizenzbedingungen unten, sondern fassen sie in
+verständlicher Form zusammen.
+
 ## License
 
 BSD 2-Clause License -- Copyright (c) 2026 Guenther Alka / napp-it.org.
