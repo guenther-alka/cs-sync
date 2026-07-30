@@ -337,6 +337,47 @@ See `cs-sync-2.0-design.info` for ACL preconditions (ZFS acltype must be
 posix or nfs4, not off), the wire protocol, and the site-replication
 topology this is designed to slot into.
 
+## Behavior on slow or unstable connections
+
+Handling disconnects and slow links is a core design goal, not an
+afterthought -- local-only 1.x never had to deal with this at all. See
+`cs-sync-2.0-design.info` section 3 for the full rationale.
+
+- **Disconnects (flaky WLAN, link flaps) are normal operation, not
+  errors.** No timeout, no alarm, just a log line. Every change that
+  can't reach the remote right now goes into a **persisted pending
+  queue** that survives both process restart and host reboot.
+- **Coalesced per path.** A file that changes 100 times while offline is
+  transferred once, latest state only -- the queue stores "this path
+  needs sync," not an event log.
+- **Reconnect uses exponential backoff** (1s -> 2s -> ... capped at
+  5min) before a retry counts against a file's failure count, so a
+  flapping link can't burn through the retry budget in seconds.
+- **Backpressure, not blocking.** The filesystem watcher never blocks on
+  the network -- it can produce changes faster than a slow link can
+  carry them indefinitely; the sender just drains the queue at whatever
+  speed the link allows.
+- **Queue depth is unbounded by design.** A deep queue just means "slow
+  link + lots of data," which has to keep working. The retry limit
+  (10 attempts, see backoff above) applies only to individual files that
+  keep failing for their own reasons (permission errors, unreadable
+  source, etc.) -- such a file is quarantined and logged so it stops
+  blocking the rest of the queue, everything else keeps syncing.
+- **Atomic writes + end-to-end hash.** Every transfer goes to a temp
+  file, is hash-verified, then renamed into place -- a drop mid-transfer
+  never leaves a half-written file that size/mtime could later mistake
+  for current.
+- **Torn-copy detection.** If the source changes while a slow transfer
+  is still reading it, a before/after size+mtime mismatch discards the
+  copy and re-queues it -- no locking needed.
+- `--bwlimit` throttles a remote leg so an initial full sync over a
+  narrow/shared link doesn't saturate it for everything else using the
+  same connection.
+
+Not yet implemented: delta transfer for large partially-changed files
+(a changed file is always sent in full -- see **Known gaps** above) and
+a queue disk-space warning threshold for very long outages.
+
 ## License
 
 BSD 2-Clause License -- Copyright (c) 2026 Guenther Alka / napp-it.org.
