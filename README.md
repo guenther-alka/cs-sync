@@ -437,6 +437,49 @@ top makes that current state recoverable to any retained point in the
 past, at essentially no extra cost (ZFS snapshots are copy-on-write,
 near-instant, and only consume space for the blocks that later change).
 
+## Disaster recovery
+
+Restoring `fileserver` from `backup` (e.g. after ransomware on the
+primary) is a one-shot **filesync back**, not a reversed cs-sync job --
+remote relationships are unidirectional by design (see **Behavior on
+slow or unstable connections** / cycle detection above), so running a
+second cs-sync instance the other way would itself be the loop pattern
+cs-sync's config-time cycle detection exists to reject. Use the
+existing filesync job type (cs-stream transport, ACL-aware) for the
+one-time restore copy instead.
+
+Typical flow:
+
+1. **Stop the forward sync job** (fileserver -> backup) so nothing more
+   propagates from a possibly still-compromised fileserver, and so
+   `backup` isn't mutated while you restore from it.
+2. **If backup itself may be compromised** (the sync job was still
+   running when the incident happened, so the corruption/encryption may
+   already be on `backup` too): do **not** sync back from `backup`'s
+   live head, and do **not** use `zfs rollback` as the first step --
+   rollback is destructive (discards everything after the chosen
+   snapshot, including the ability to try an earlier one if you picked
+   wrong). Instead:
+   - `zfs clone` the last known-good autosnap (see **Data versioning**
+     above) into a temporary dataset -- instant, non-destructive.
+   - Verify the data in the clone (spot-check files/hashes for absence
+     of corruption/encryption markers).
+   - If verification fails, clone an earlier snapshot and repeat.
+   - Only once a clean point is confirmed, filesync from that verified
+     clone to the fileserver. A true `zfs rollback` (or `zfs promote`
+     of the clone) is optional cleanup *after* verification, not part
+     of the recovery path itself.
+3. **Filesync back** (verified backup snapshot/clone -> fileserver) via
+   the cs-stream filesync job.
+4. **Reset cs-sync's persisted state** on the fileserver side (delete
+   `.backupdata/`: baseline + `acl.csv`) before restarting the forward
+   job, so the first reconcile pass does a fresh bootstrap against the
+   just-restored tree instead of comparing against a stale pre-incident
+   baseline.
+5. **Restart the forward sync job.** Fileserver and backup should now be
+   identical, so the first pass should settle cleanly with no large
+   diff and no risk of tripping the mass-delete guard.
+
 ## License
 
 BSD 2-Clause License -- Copyright (c) 2026 Guenther Alka / napp-it.org.
