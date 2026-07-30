@@ -511,6 +511,15 @@ it, cs-sync writes a status line to a **hardcoded** path:
 the binary. Omit `--service-id` for standalone use (it's optional) and
 this code path is never touched.
 
+**No fixed start order for `serve`/`run`:** unlike cs-stream, the remote
+receiver (`cs-sync serve --dest ...`) is a standing service -- it opens
+`--listen` and simply waits for a connection, applying incoming
+operations under `--dest` as soon as one arrives. Start `serve` on the
+remote side whenever convenient (before or after `run` on the primary
+side); `run --remote host:port` retries/reconnects on its own if the
+receiver isn't up yet (see **Behavior on slow or unstable connections**
+above), so there's no race to get right.
+
 ## Warranty
 
 napp-it cs-sync/stream is open source. You may use, analyze, or modify
