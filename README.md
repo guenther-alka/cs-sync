@@ -415,6 +415,28 @@ a queue disk-space warning threshold for very long outages.
   this means reading every file's content once per rescan cycle, I/O
   load that scales with total data size, not just file count.
 
+## Data versioning
+
+cs-sync itself keeps only the current state on the target -- it is a
+realtime mirror, not a version history. A file overwritten or deleted on
+`primary` is overwritten or deleted on `backup`/`secondary` too, by
+design (that's what "realtime" means).
+
+For point-in-time recovery (accidental deletes, ransomware, a bad
+overwrite propagated before anyone notices), run a ZFS **autosnap job**
+on the backup server's dataset as a complement to realtime sync -- not
+a replacement for it, an independent safety net underneath it. A
+typical schedule:
+
+- snapshot every hour, keep 12
+- snapshot every day, keep 60
+- snapshot every week/month, keep as needed
+
+Realtime sync keeps `backup` current to the minute; the autosnap job on
+top makes that current state recoverable to any retained point in the
+past, at essentially no extra cost (ZFS snapshots are copy-on-write,
+near-instant, and only consume space for the blocks that later change).
+
 ## License
 
 BSD 2-Clause License -- Copyright (c) 2026 Guenther Alka / napp-it.org.
