@@ -430,7 +430,7 @@ typical schedule:
 
 - snapshot every hour, keep 24
 - snapshot every day, keep 30
-- snapshot every week/month, keep as needed
+- snapshot every week/month/year, keep as needed
 
 Realtime sync keeps `backup` current to the minute; the autosnap job on
 top makes that current state recoverable to any retained point in the
