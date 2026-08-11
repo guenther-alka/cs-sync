@@ -80,8 +80,18 @@ func New(roots []string, opt Options) (Watcher, error) {
 // subdirectories -- mirroring fsnotify's "watch new dirs on Create".
 func (pw *portWatcher) addRecursive(dir string) {
 	filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || !d.IsDir() {
+		if err != nil {
 			return nil
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		// v3.0 fix -- see watch_fsnotify.go's addRecursive for the full
+		// rationale (live-verified cs_26.08.11): never associate
+		// .backupdata, or this process's own state/log/acl.csv writes
+		// there re-fire their own FEN events forever.
+		if d.Name() == ".backupdata" {
+			return filepath.SkipDir
 		}
 		pw.associate(p)
 		return nil
@@ -131,6 +141,17 @@ func (pw *portWatcher) pollLoop() {
 
 		// re-associate the fired directory and pick up any new subdirs
 		pw.addRecursive(path)
+
+		// v3.0 defense-in-depth (see watch.go's isBackupdataPath doc
+		// comment): FEN associations are directory-scoped and addRecursive
+		// already skips .backupdata (this file's own SkipDir fix), so
+		// this should be unreachable in practice -- filtered here anyway
+		// so a future FEN semantics surprise can't silently reopen the
+		// self-trigger loop watch_fsnotify.go had to fix for real on
+		// Windows.
+		if isBackupdataPath(path) {
+			continue
+		}
 
 		select {
 		case pw.raw <- struct{}{}:

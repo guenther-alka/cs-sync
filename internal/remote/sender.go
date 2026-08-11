@@ -18,6 +18,7 @@ import (
 	"github.com/guenther-alka/cs-sync/internal/logging"
 	"github.com/guenther-alka/cs-sync/internal/model"
 	"github.com/guenther-alka/cs-sync/internal/reconcile"
+	"github.com/guenther-alka/cs-sync/internal/rustfs"
 	"github.com/guenther-alka/cs-sync/internal/wire"
 )
 
@@ -50,6 +51,17 @@ type Sender struct {
 	ServiceID string
 	LoopStamp string
 
+	// RustFSTarget (v3.0 -- replaces v2.1's RustFSRemote string, which
+	// pointed at a manually pre-configured named rclone remote): when
+	// non-zero (Bucket != ""), Backup targets a RustFS bucket instead of
+	// a wire-protocol receiver. sendOp routes through sender_rustfs.go's
+	// sendOpRustFS instead of the wire protocol below. Backup is
+	// unidirectional by nature already (this whole Sender is always
+	// one-way primary -> target), so unlike a bidir Secondary, no
+	// localhost-only restriction applies here -- a remote RustFS backup
+	// target is fully supported.
+	RustFSTarget rustfs.Target
+
 	conn     *wire.Conn
 	peer     wire.Welcome
 	sameOS   bool
@@ -73,6 +85,15 @@ func (s *Sender) Init() error {
 // Transient failure is NORMAL operation (section 3), returned as error --
 // the caller just retries on the next pass.
 func (s *Sender) connect() error {
+	if s.RustFSTarget.Bucket != "" {
+		// 2.1: no wire-protocol connection at all for a RustFS backup
+		// target -- rclone handles its own connection/auth per call.
+		// s.conn stays nil for the whole Sender lifetime in this mode,
+		// which is exactly what makes the acl.csv/rootACL push blocks
+		// at the end of Pass (both already guarded on "s.conn != nil")
+		// correctly no-op too, with no separate change needed there.
+		return nil
+	}
 	if s.conn != nil {
 		// cheap liveness probe; reconnect on failure. roundtrip() already
 		// closes + nils s.conn on any transport error (found via sandbox
@@ -239,9 +260,14 @@ func (s *Sender) Pass(primaryTree model.Tree, reason string, rootACL string, acl
 			} else {
 				s.Log.Printf("WARN: %s failed (%v), will retry with backoff", op.Path, err)
 			}
-			if s.conn == nil {
+			if s.conn == nil && s.RustFSTarget.Bucket == "" {
 				break // connection died -- rest stays pending for next pass
 			}
+			// 2.1: for RustFS, s.conn is always nil (no wire-protocol
+			// connection exists in this mode, see connect()) -- a single
+			// failed rclone op is just a failed op, not a "connection
+			// died" signal, so the batch continues to the next op
+			// instead of aborting early.
 			continue
 		}
 		s.retry.Clear(op.Path)
@@ -271,6 +297,9 @@ func (s *Sender) Pass(primaryTree model.Tree, reason string, rootACL string, acl
 
 // sendOp transmits one operation and waits for its ack.
 func (s *Sender) sendOp(op reconcile.Op, primaryTree model.Tree) error {
+	if s.RustFSTarget.Bucket != "" {
+		return s.sendOpRustFS(op, primaryTree)
+	}
 	e := primaryTree[op.Path]
 	switch op.Kind {
 	case reconcile.OpMkdir:

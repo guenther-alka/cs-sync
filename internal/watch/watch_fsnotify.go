@@ -53,8 +53,26 @@ func New(roots []string, opt Options) (Watcher, error) {
 
 func (fw *fsWatcher) addRecursive(root string) error {
 	return filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || !d.IsDir() {
+		if err != nil {
 			return nil
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		// v3.0 fix (live-verified cs_26.08.11, sync/push/pull live tests
+		// against real infra): NEVER watch .backupdata (state.Dir's own
+		// directory) -- it holds cs-sync.log, cs-sync.state.json, and
+		// acl.csv, all of which this process itself rewrites on every
+		// pass. Without this exclusion, those self-writes generate their
+		// own fsnotify events, which re-trigger a debounced pass, which
+		// rewrites the log again, ... a permanent, if low-cost (no real
+		// ops -- scanner.Scan already excludes .backupdata from the
+		// compared tree, see scanner.ExcludedTopLevel), self-sustaining
+		// busy-loop that never settles. skipping the whole subtree (not
+		// just the directory itself) is correct: nothing under
+		// .backupdata is ever meant to be watched.
+		if d.Name() == ".backupdata" {
+			return filepath.SkipDir
 		}
 		fw.mu.Lock()
 		if fw.pollFallback || (fw.maxDirs > 0 && fw.watchedDirs >= fw.maxDirs) {
@@ -91,6 +109,22 @@ func (fw *fsWatcher) debounceLoop(debounce time.Duration) {
 		case ev, ok := <-fw.w.Events:
 			if !ok {
 				return
+			}
+			// v3.0 fix, take 2 (live-verified cs_26.08.11): the
+			// addRecursive SkipDir above is necessary but NOT
+			// sufficient on Windows -- fsnotify's Windows backend
+			// (ReadDirectoryChangesW) watches with bWatchSubtree=TRUE,
+			// meaning a single Add() on primaryPath2 already recursively
+			// observes everything below it, INCLUDING .backupdata, even
+			// though this process never explicitly registered a watch
+			// there. Confirmed by re-running the exact same idle sync-
+			// mode test after the SkipDir fix: events kept firing every
+			// ~500ms indefinitely, unchanged. The only backend-portable
+			// fix is filtering by EVENT PATH, not by which directories
+			// were explicitly registered -- do that here, before the
+			// event is allowed to reset the debounce timer at all.
+			if isBackupdataPath(ev.Name) {
+				continue
 			}
 			if ev.Op&fsnotify.Create == fsnotify.Create {
 				// best-effort: newly created dir needs its own watch too

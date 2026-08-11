@@ -10,7 +10,11 @@
 // revisiting for very large trees.
 package watch
 
-import "time"
+import (
+	"path/filepath"
+	"strings"
+	"time"
+)
 
 // Watcher signals Changed() whenever a debounced batch of filesystem
 // events has settled, and periodically via the safety-net rescan timer
@@ -37,4 +41,23 @@ func (o Options) withDefaults() Options {
 		o.SafetyNet = 24 * time.Hour
 	}
 	return o
+}
+
+// isBackupdataPath reports whether p (an absolute or relative path, as
+// delivered by either backend's raw event) has ".backupdata" as one of
+// its path components. Used by both watch_fsnotify.go (Windows's
+// ReadDirectoryChangesW-based backend watches subtrees recursively
+// regardless of which individual directories were explicitly
+// registered, so addRecursive's SkipDir alone does not stop events for
+// paths under .backupdata from arriving -- see that file's debounceLoop
+// for the live-verified finding) and watch_eventport_illumossolaris.go
+// (defense in depth; FEN associations are not known to auto-recurse the
+// same way, but filtering by path is cheap and removes any doubt).
+func isBackupdataPath(p string) bool {
+	for _, part := range strings.Split(filepath.ToSlash(p), "/") {
+		if part == ".backupdata" {
+			return true
+		}
+	}
+	return false
 }

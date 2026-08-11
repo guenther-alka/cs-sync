@@ -12,6 +12,7 @@ import (
 	"github.com/guenther-alka/cs-sync/internal/acl"
 	"github.com/guenther-alka/cs-sync/internal/model"
 	"github.com/guenther-alka/cs-sync/internal/reconcile"
+	"github.com/guenther-alka/cs-sync/internal/rustfs"
 )
 
 // Roots maps side name -> filesystem root path.
@@ -27,6 +28,22 @@ type Roots struct {
 	// secondary; this bootstrap map (relpath -> acl text, loaded from
 	// secondary/.backupdata/acl.csv at startup) is the one exception.
 	PrimaryBootstrapACL map[string]string
+
+	// SecondaryKind is "" (default: Secondary is a plain filesystem path,
+	// existing v1/v2 behavior, completely unchanged) or "rustfs"
+	// (Secondary is a local RustFS/S3 bucket, synced via rclone --
+	// sync-2.1-design.info). When "rustfs", Secondary above is still set
+	// (used as the underlying ZFS storage path for the filesystem
+	// watcher -- sync-2.1-design.info section 4.1) but is NEVER written
+	// to directly by the executor; all Secondary-side reads/writes route
+	// through SecondaryRustFSRemote via package rustfs instead.
+	SecondaryKind string
+
+	// SecondaryRustFSTarget is the RustFS target (host/port/bucket +
+	// inline credentials), required when SecondaryKind == "rustfs"
+	// (v3.0 -- replaces the v2.1 SecondaryRustFSRemote string, which
+	// pointed at a manually pre-configured named rclone remote).
+	SecondaryRustFSTarget rustfs.Target
 }
 
 func (r Roots) root(side string) string {
@@ -59,6 +76,17 @@ func Apply(ops []reconcile.Op, roots Roots, log Logf) []error {
 }
 
 func applyOne(op reconcile.Op, roots Roots, log Logf) error {
+	// RustFS dispatch (sync-2.1-design.info): if this op reads from or
+	// writes to a Secondary configured as SecondaryKind=="rustfs", route
+	// it through applyOneRustFS (executor_rustfs.go) instead of the
+	// plain-filesystem logic below. Every other case (the vast majority
+	// -- plain filesystem Secondary, or an op that doesn't touch
+	// Secondary at all) falls through completely unchanged, so this is
+	// a strictly additive, zero-risk-to-existing-behavior dispatch.
+	if roots.SecondaryKind == "rustfs" && (op.DstSide == reconcile.SideSecondary || op.SrcSide == reconcile.SideSecondary) {
+		return applyOneRustFS(op, roots, log)
+	}
+
 	dstRoot := roots.root(op.DstSide)
 
 	switch op.Kind {
