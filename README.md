@@ -231,14 +231,15 @@ support the `VAR=value command` shell syntax.)
 ```
 go build ./...      # compiles cleanly, all packages
 go vet ./...         # static analysis, no findings
-go test ./...         # unit tests (internal/endpoint, internal/rustfs)
+go test ./...         # unit tests (internal/endpoint, internal/rustfs, internal/remote)
 ```
 
 Unit tests cover the endpoint parser (`internal/endpoint`) — every
 grammar case including the documented edge cases (Windows drive paths
-vs. `host:port`, bare-relative-path handling) — and the RustFS package
+vs. `host:port`, bare-relative-path handling) — the RustFS package
 (`internal/rustfs`) — webhook event parsing, `--allow_ip` filtering,
-xl.meta parsing.
+xl.meta parsing — and the remote receiver (`internal/remote`) — that
+incoming wire paths are refused when they would escape `--dest`.
 
 `-race` requires cgo (a C toolchain); skip it on a host without one —
 `go build`/`go vet`/`go test` alone already catch the vast majority of

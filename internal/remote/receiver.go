@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/guenther-alka/cs-sync/internal/acl"
@@ -174,9 +175,17 @@ func (rv *Receiver) handle(c net.Conn) {
 				ack(err)
 				continue
 			}
-			oldp := rv.full(op.OldPath)
-			newp := rv.full(op.Path)
-			err := os.MkdirAll(filepath.Dir(newp), 0755)
+			oldp, err := rv.full(op.OldPath)
+			if err != nil {
+				ack(err)
+				continue
+			}
+			newp, err := rv.full(op.Path)
+			if err != nil {
+				ack(err)
+				continue
+			}
+			err = os.MkdirAll(filepath.Dir(newp), 0755)
 			if err == nil {
 				err = os.Rename(oldp, newp)
 			}
@@ -191,7 +200,10 @@ func (rv *Receiver) handle(c net.Conn) {
 				ack(err)
 				continue
 			}
-			err := os.Remove(rv.full(op.Path))
+			full, err := rv.full(op.Path)
+			if err == nil {
+				err = os.Remove(full)
+			}
 			if os.IsNotExist(err) {
 				err = nil
 			}
@@ -206,7 +218,10 @@ func (rv *Receiver) handle(c net.Conn) {
 				ack(err)
 				continue
 			}
-			err := os.RemoveAll(rv.full(op.Path))
+			full, err := rv.full(op.Path)
+			if err == nil {
+				err = os.RemoveAll(full)
+			}
 			if err != nil {
 				rv.Log.Printf("ERROR rmdir %s: %v", op.Path, err)
 			}
@@ -218,9 +233,13 @@ func (rv *Receiver) handle(c net.Conn) {
 				ack(err)
 				continue
 			}
-			full := rv.full(op.Path)
+			full, err := rv.full(op.Path)
+			if err != nil {
+				ack(err)
+				continue
+			}
 			os.Remove(full) // replace if exists
-			err := os.MkdirAll(filepath.Dir(full), 0755)
+			err = os.MkdirAll(filepath.Dir(full), 0755)
 			if err == nil {
 				err = os.Symlink(op.LinkTarget, full)
 			}
@@ -236,7 +255,11 @@ func (rv *Receiver) handle(c net.Conn) {
 				continue
 			}
 			curPath = curMeta.Path
-			full := rv.full(curPath)
+			full, err := rv.full(curPath)
+			if err != nil {
+				ack(err)
+				continue
+			}
 			if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
 				ack(err)
 				continue
@@ -310,7 +333,12 @@ func (rv *Receiver) handle(c net.Conn) {
 			}
 			full := rv.Dest
 			if fa.Path != "." {
-				full = rv.full(fa.Path)
+				var perr error
+				full, perr = rv.full(fa.Path)
+				if perr != nil {
+					ack(perr)
+					continue
+				}
 			}
 			err := acl.Apply(full, fa.AclType, fa.Text)
 			if err != nil {
@@ -358,11 +386,18 @@ func (rv *Receiver) finishFile(f *os.File, tmpPath, relPath string, meta wire.Fi
 	if err := os.Chtimes(tmpPath, mt, mt); err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, rv.full(relPath))
+	full, err := rv.full(relPath)
+	if err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, full)
 }
 
 func (rv *Receiver) mkdir(op wire.Op) error {
-	full := rv.full(op.Path)
+	full, err := rv.full(op.Path)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(full, os.FileMode(op.Mode)); err != nil {
 		return err
 	}
@@ -397,6 +432,20 @@ func (rv *Receiver) writeAclCSV(data []byte) error {
 	return os.Rename(tmp, filepath.Join(dir, state.AclCsvName))
 }
 
-func (rv *Receiver) full(rel string) string {
-	return filepath.Join(rv.Dest, filepath.FromSlash(rel))
+// full resolves a wire-supplied relpath to an absolute path under Dest,
+// refusing absolute paths and ".." traversal that would escape the sync
+// root (defense-in-depth: the sender is authenticated by the shared key,
+// but a compromised/rogue peer must not be able to read/write/delete
+// outside --dest).
+func (rv *Receiver) full(rel string) (string, error) {
+	clean := filepath.Clean(filepath.FromSlash(rel))
+	if filepath.IsAbs(clean) {
+		return "", fmt.Errorf("refusing absolute path: %q", rel)
+	}
+	full := filepath.Join(rv.Dest, clean)
+	rel2, err := filepath.Rel(rv.Dest, full)
+	if err != nil || rel2 == ".." || strings.HasPrefix(rel2, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path escapes dest: %q", rel)
+	}
+	return full, nil
 }
