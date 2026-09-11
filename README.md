@@ -162,6 +162,7 @@ on every `v*` tag: `mswin.amd64`, `linux.amd64`, `linux.arm64`,
 `darwin.arm64`).
 
 ### Using cs-sync from napp-it CS (csweb-gui)
+csweb-gui deploys and updates this manually per member menu About > Download cs-tools
 
 napp-it CS's own Realtime Sync menu (`03_System > 02_Services > 25_Realtime_Sync`)
 expects the binary at a fixed path per platform:
