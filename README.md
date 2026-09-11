@@ -1,7 +1,7 @@
 # cs-sync
 
 Realtime bidirectional/unidirectional folder sync service with folder
-ACL sync, for ZFS hosts. Part of [napp-it CS](https://napp-it.org)
+ACL sync, for ZFS hosts. Part of [napp-it 4ai (client-server edition)](https://napp-it.org)
 (csweb-gui), also usable completely standalone.
 
 **Tri-endpoint.** Every relationship connects two of three endpoint
