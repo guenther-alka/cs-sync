@@ -4,6 +4,10 @@ Realtime bidirectional/unidirectional folder sync service with folder
 ACL sync, for ZFS hosts. Part of [napp-it 4ai (client-server edition)](https://napp-it.org)
 (csweb-gui), also usable completely standalone.
 
+Part of the [napp-it 4ai (client-server edition)](https://napp-it.org) cluster tooling family
+(alongside [cs-tools](https://www.napp-it.org/cs-tools_en.html))
+csweb-gui deploys and updates this manually per member menu About > Download cs-tools
+
 **Tri-endpoint.** Every relationship connects two of three endpoint
 kinds — a local filesystem folder, another cs-sync service (wire
 protocol, natively encrypted), or a RustFS/S3 bucket — through one
