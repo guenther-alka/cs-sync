@@ -5,6 +5,13 @@ All notable changes to cs-sync are documented here. Versions follow
 
 ## v3.1.0 (2026-10-13)
 
+### Fixed (after the live test)
+
+- Idle detection: `written@n0` is read with `-p` (Linux printed `0B`, so an idle dataset counted as changed
+  and was sent every cycle).
+- The adaptive wait (2x the duration of the last send) no longer applies after the initial full send, so the
+  first write afterwards is synced at the next cycle.
+
 ### Added
 
 - **ZFS replication mode** (`cs-sync run --mode zfs`, receiver `cs-sync zfspull`): event-based realtime

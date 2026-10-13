@@ -37,6 +37,7 @@ type zcfg struct {
 	freeze, freezeBin           string // freeze=hh:mm (daily app-consistent snapshot), tool path
 	freezeArgs                  []string
 	freezeTried                 string // YYYYMMDD of the last freeze attempt
+	lastFull                    bool   // last cycle was an initial full send (no adaptive wait afterwards)
 	recursive                   bool   // replicate child datasets too (send -R)
 	remoteAddr, key             string // LAN pair: backup host:port + transfer key ("" = local backup)
 }
@@ -198,7 +199,9 @@ func (c *zcfg) destroySnap(full string) (string, error) {
 func (c *zcfg) changed() bool {
 	prop := "written@" + c.prefix + "n0"
 	if !c.recursive {
-		return zfsGet(prop, c.primary) != "0"
+		// -p: exact bytes ("0", not "0B" as Linux prints without it), otherwise an idle dataset always counts as changed
+		v, err := zfsRun("get", "-H", "-p", "-o", "value", prop, c.primary)
+		return err != nil || strings.TrimSpace(v) != "0"
 	}
 	out, err := zfsRun("get", "-H", "-p", "-r", "-t", "filesystem,volume", "-o", "value", prop, c.primary)
 	if err != nil {
@@ -364,6 +367,7 @@ func (c *zcfg) cycle() (bool, error) {
 		c.destroySnap(pnew)
 		return false, e
 	}
+	c.lastFull = !zfsExists(c.backup)
 	if !zfsExists(c.backup) {
 		c.log.Printf("backup %s does not exist: full send", c.backup)
 		if err := pipeSendRecv(c.sendArgs(pnew), []string{"recv", "-s", "-u", c.backup}); err != nil {
@@ -572,7 +576,7 @@ func zfsCmd(args []string) {
 			c.status("ok " + time.Now().Format("15:04:05") + " (" + lastDur.Round(time.Millisecond).String() + ")")
 		}
 		wait := *interval
-		if 2*lastDur > wait && sent { // adaptive: slow sends widen the interval
+		if 2*lastDur > wait && sent && !c.lastFull { // adaptive: slow incremental sends widen the interval (not the initial full send: the next write must sync at once)
 			wait = 2 * lastDur
 		}
 		if err != nil && wait < 10*time.Second {

@@ -174,6 +174,7 @@ func (c *zcfg) cycleRemote() (bool, error) {
 		return false, e
 	}
 	args := c.sendArgs(pnew)
+	c.lastFull = plan.Kind != "inc"
 	if plan.Kind == "inc" {
 		var base *zsnap
 		for i := range pl {

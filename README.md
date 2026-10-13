@@ -196,6 +196,16 @@ How it works:
 Requirements: OpenZFS (Linux, FreeBSD, illumos, Windows). On Windows the process
 must run elevated, because `zfs send | zfs recv` pipes cannot be relaunched.
 
+Live test (2026-10-13, Proxmox 9 -> OmniOS r151058, LAN): an LXC (cgroup freeze) and a VM (`qmp-pause`)
+as Primary under continuous guest writes (15 MB every 4 s, 500 MB burst, VM boot). Every write burst
+triggered an incremental send, the daily `--freeze` snapshot came through `cs-freeze4snap` 1.3.0 and arrived
+with `cs:consistent=app` on both sides, `kill -9` of sender and receiver (also in the middle of a stream)
+was recovered by retry and resume token, and all files were md5-identical on the Backup. Under permanent
+writes the Primary sends back to back (serial, never overlapping, one snapshot per cycle; the pause is
+`--interval`, widened to 2x the duration of a slow incremental send). A change shows up in `written@` only
+after the ZFS transaction group is committed (up to about 5 s). Not covered yet: QEMU guest agent
+`fsfreeze`, ESXi, rollback approval.
+
 ## Install — pre-built binaries
 
 Prebuilt binaries for every platform are attached to each
