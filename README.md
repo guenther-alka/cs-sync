@@ -156,6 +156,46 @@ remote-source-of-truth case a remote bucket actually fits.
 
 ---
 
+## ZFS replication mode (`--mode zfs`, `zfspull`)
+
+Event-based real-time replication of a ZFS dataset, always **Primary -> Backup**.
+Instead of copying files, cs-sync detects changes (`written@<snap>`) and sends
+incremental `zfs send | zfs recv` streams (resumable with `-s`). Open or running
+VMs are no problem: the snapshot is crash-consistent. Optionally `cs-freeze4snap`
+is called for an application-consistent daily snapshot.
+
+```
+# local: Primary and Backup on the same host
+cs-sync run --mode zfs --primary tank/data --backup tank2/data --nr 1 \
+            --keep hours:24,days:30 --versions y
+
+# LAN: sender on the Primary, receiver on the Backup
+cs-sync zfspull --backup tank2/data --listen :9055 --key <key> --nr 1
+cs-sync run --mode zfs --primary tank/data --backup-host 192.168.2.189:9055 --key <key> --nr 1
+```
+
+| Option | Meaning |
+|---|---|
+| `--primary` / `--backup` | Dataset names (local mode: both, LAN: Primary on sender, Backup on `zfspull`) |
+| `--backup-host` | Address of the `zfspull` receiver (LAN mode) |
+| `--nr` | Sync number, part of the snapshot names `sync_<nr>_<fsguid>_<slot>` |
+| `--interval` | Check interval in seconds |
+| `--keep hours:N,days:M` | Retention, applied by each side on its own |
+| `--versions y\|n` | Keep hourly/daily versions (`n`: only the latest two snapshots) |
+| `--rollback ask\|auto` | If the Backup has newer snapshots than the common base: wait for approval in the frontend (`ask`) or roll back (`auto`) |
+| `--recursive` | Replicate child datasets and zvols (`-R`) |
+| `--freeze`, `--freeze-bin`, `--freeze-args` | Application-consistent daily snapshot via `cs-freeze4snap` (falls back to a plain snapshot on failure) |
+
+How it works:
+
+- Snapshot slots: `new`, `n0`, `n1` (hold 2), `kh<MMDDHH>`, `kd<MMDD>`, `kf<MMDD>` (freeze/app-consistent).
+- The common base is found by GUID; the Primary never queries Backup snapshots, it only receives the Backup's list in the handshake.
+- Crash recovery derives its state from ZFS itself; interrupted transfers are resumed with `send -t <token>`.
+- The wire protocol reuses the encrypted handshake of the file modes (new frames 15-20, `ProtoVersion` unchanged).
+
+Requirements: OpenZFS (Linux, FreeBSD, illumos, Windows). On Windows the process
+must run elevated, because `zfs send | zfs recv` pipes cannot be relaunched.
+
 ## Install — pre-built binaries
 
 Prebuilt binaries for every platform are attached to each

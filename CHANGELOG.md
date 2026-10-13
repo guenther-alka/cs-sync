@@ -3,6 +3,18 @@
 All notable changes to cs-sync are documented here. Versions follow
 `v<major>.<minor>.<patch>`; see the git tags for the full history.
 
+## v3.1.0 (2026-10-13)
+
+### Added
+
+- **ZFS replication mode** (`cs-sync run --mode zfs`, receiver `cs-sync zfspull`): event-based realtime
+  ZFS replication Primary â†’ Backup, local (one service) or LAN (service pair). Incremental
+  `zfs send | zfs recv` after write events, snapshot slots `n0`/`n1`, `kh`/`kd` retention per side,
+  GUID handshake (the Primary never queries the Backup's snapshots), resume tokens, rollback approval
+  via `<id>.blocked` / `<id>.approve`, `--recursive y` (`send -R`), daily application-consistent snapshot
+  through cs-freeze4snap (`--freeze hh:mm`, slot `kf`).
+- New wire frames 15â€“20 (`internal/wire/zfs.go`); `ProtoVersion` unchanged.
+- Live-tested Proxmox â†’ OmniOS over the LAN; Windows/OpenZFS tested locally.
 ## v3.0.1 (2026-08-18)
 
 ### Security
