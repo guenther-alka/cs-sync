@@ -3,6 +3,13 @@
 All notable changes to cs-sync are documented here. Versions follow
 `v<major>.<minor>.<patch>`; see the git tags for the full history.
 
+## v3.2.1 (2026-10-14)
+
+### Changed
+
+- `--pve-config` removed: fixed behaviour. When the Primary is a Proxmox host (`/etc/pve` exists) the VM/CT config of the synced
+  disks is always stored as `cs:pveconf` (logged at start). Other sources are unaffected.
+
 ## v3.2.0 (2026-10-14)
 
 ### Added

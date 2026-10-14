@@ -531,7 +531,6 @@ func zfsCmd(args []string) {
 	freeze := fs.String("freeze", "", "hh:mm: once a day take the cycle snapshot via cs-freeze4snap (Proxmox/ESXi), empty=off")
 	freezeBin := fs.String("freeze-bin", "cs-freeze4snap", "path of the cs-freeze4snap binary")
 	freezeArgs := fs.String("freeze-args", "", "extra arguments for cs-freeze4snap snap, space separated (e.g. --policy memkeep=3)")
-	pveConfOpt := fs.String("pve-config", "auto", "auto|y|n: store the Proxmox VM/CT config (/etc/pve) of the synced disks as cs:pveconf properties on both sides (auto = on when /etc/pve exists)")
 	backupHost := fs.String("backup-host", "", "LAN pair: host[:port] of the cs-sync zfsreceive on the backup member (instead of a local --backup)")
 	key := fs.String("key", "", "transfer key for --backup-host")
 	serviceID := fs.String("service-id", "", "status file _cfg/sync/<id>.last")
@@ -563,7 +562,7 @@ func zfsCmd(args []string) {
 	parseKeep(*keep, &c.keepHours, &c.keepDays)
 	c.freeze, c.freezeBin, c.freezeArgs = *freeze, *freezeBin, strings.Fields(*freezeArgs)
 	c.remoteAddr, c.key, c.recursive = *backupHost, *key, *recursive == "y"
-	c.pveConf = *pveConfOpt == "y" || (*pveConfOpt == "auto" && pveAvailable())
+	c.pveConf = pveAvailable() // fixed behaviour: a Proxmox source always carries the VM/CT config along
 	if c.remoteAddr != "" {
 		c.backup = c.remoteAddr
 	}
@@ -574,6 +573,9 @@ func zfsCmd(args []string) {
 		os.Exit(1)
 	}
 	c.prefix = "sync_" + *nr + "_" + g + "_"
+	if c.pveConf {
+		log.Printf("Proxmox source detected: VM/CT configs of the synced disks are stored as cs:pveconf")
+	}
 	c.status(fmt.Sprintf("started (%s) zfs %s -> %s", time.Now().Format("2006-01-02 15:04:05"), *primary, *backup))
 	var lastDur time.Duration
 	for {

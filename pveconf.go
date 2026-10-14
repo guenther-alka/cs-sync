@@ -4,7 +4,7 @@ package main
 //
 // A replicated zvol alone is not a restorable VM: hardware, network, boot
 // order and the disk assignment live in /etc/pve/qemu-server/<id>.conf (or
-// lxc/<id>.conf). With --pve-config the sender reads the config of every VM
+// lxc/<id>.conf). On a Proxmox source (/etc/pve exists) the sender always reads the config of every VM
 // or container whose disk datasets (vm-<id>-disk-N, subvol-<id>-disk-N,
 // base-<id>-disk-N) are part of the sync and stores it as gzip+base64 in the
 // user property cs:pveconf (continued in cs:pveconf.1, .2 ... because one
@@ -332,7 +332,7 @@ func pveconfCmd(args []string) {
 		}
 	}
 	if found == 0 {
-		fmt.Fprintln(os.Stderr, "no cs:pveconf found on", *ds, "(source without Proxmox, --pve-config n, or no sync with a VM disk dataset yet)")
+		fmt.Fprintln(os.Stderr, "no cs:pveconf found on", *ds, "(source without Proxmox, or no sync with a VM disk dataset yet)")
 		os.Exit(1)
 	}
 }

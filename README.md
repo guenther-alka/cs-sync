@@ -187,7 +187,6 @@ cs-sync run --mode zfs --primary tank/data --backup-host 192.168.2.189:9055 --ke
 | `--versions y\|n` | Keep hourly/daily versions (`n`: only the latest two snapshots) |
 | `--rollback ask\|auto` | If the Backup has newer snapshots than the common base: wait for approval in the frontend (`ask`) or roll back (`auto`) |
 | `--recursive` | Replicate child datasets and zvols (`-R`) |
-| `--pve-config auto\|y\|n` | Store the Proxmox VM/CT config as `cs:pveconf` properties on both sides (default `auto`: on when `/etc/pve` exists) |
 | `--freeze`, `--freeze-bin`, `--freeze-args` | Application-consistent daily snapshot via `cs-freeze4snap` (falls back to a plain snapshot on failure) |
 
 How it works:
@@ -210,11 +209,11 @@ writes the Primary sends back to back (serial, never overlapping, one snapshot p
 after the ZFS transaction group is committed (up to about 5 s). Not covered yet: QEMU guest agent
 `fsfreeze`, ESXi, rollback approval.
 
-### Proxmox: VM/CT configuration (`--pve-config`)
+### Proxmox: VM/CT configuration
 
 A replicated zvol alone is not a restorable VM: hardware, network, boot order and the disk assignment live in
-`/etc/pve/qemu-server/<id>.conf` (containers: `/etc/pve/lxc/<id>.conf`). With `--pve-config` (default `auto`: on when
-`/etc/pve` exists, `y` forces it, `n` switches it off) the sender reads the config of every VM/CT whose disk datasets
+`/etc/pve/qemu-server/<id>.conf` (containers: `/etc/pve/lxc/<id>.conf`). When cs-sync finds that the Primary is a Proxmox host
+(`/etc/pve` exists), the sender always reads the config of every VM/CT whose disk datasets
 (`vm-<id>-disk-N`, `subvol-<id>-disk-N`, `base-<id>-disk-N`) are part of the sync and stores it as ZFS user property
 `cs:pveconf` (gzip + base64, continued in `cs:pveconf.1`, `.2` ... because one property value is limited to about 8 KB):
 
@@ -250,7 +249,7 @@ should run again, `<S>` its ZFS storage (see `/etc/pve/storage.cfg`), `<P>` the 
    snapshot is rotated during recovery. On the backup dataset never run `zfs rollback`, `zfs destroy` of `sync_` snapshots or
    `zfs set readonly=off`; recovery always works on a copy.
 2. **Find the VM.** `cs-sync pveconf list --dataset <B-or-parent>` shows `id=<id>`, type (`qemu` or `lxc`) and the snapshots with a config.
-   No output ("no cs:pveconf found"): the source had no `/etc/pve` or `--pve-config n`; then the data can still be
+   No output ("no cs:pveconf found"): the source was not a Proxmox host (no `/etc/pve`); then the data can still be
    restored (step 4), but the config must be rebuilt by hand.
 3. **Choose the snapshot.** `zfs list -t snapshot -d 1 -o name,creation,cs:consistent <B>`. `kf<MMDD>` with `cs:consistent=app`
    is the application-consistent daily snapshot (guest agent freeze); `n0` is the newest state (crash-consistent, like after a
