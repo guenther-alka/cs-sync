@@ -1,5 +1,10 @@
 # cs-sync
 
+> **Always encrypted.** Every replication or sync between cs-sync hosts - over LAN, WAN or the internet -
+> is encrypted end to end (ChaCha20-Poly1305) with a one-time shared transfer key (`--key`)
+> that you set once per sync pair. Nothing is ever sent in clear text; a peer with the wrong key is rejected
+> in the handshake. No VPN or TLS tunnel is required.
+
 Realtime bidirectional/unidirectional folder sync service with folder
 ACL sync, for ZFS hosts. Part of [napp-it 4ai (client-server edition)](https://napp-it.org)
 (csweb-gui), also usable completely standalone.
