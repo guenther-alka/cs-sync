@@ -156,9 +156,12 @@ remote-source-of-truth case a remote bucket actually fits.
 
 ---
 
-## ZFS replication mode (`--mode zfs`, `zfspull`)
+## ZFS replication mode (`--mode zfs`, `zfsreceive`)
 
 Event-based real-time replication of a ZFS dataset, always **Primary -> Backup**.
+The Primary side (`run --mode zfs`) is the **sender / master** and pushes the data; the Backup side
+(`zfsreceive`) is the **receiver / slave**: it only listens and applies what it receives, it never pulls.
+`zfspull` is the former name of `zfsreceive` and still works as an alias.
 Instead of copying files, cs-sync detects changes (`written@<snap>`) and sends
 incremental `zfs send | zfs recv` streams (resumable with `-s`). Open or running
 VMs are no problem: the snapshot is crash-consistent. Optionally `cs-freeze4snap`
@@ -169,15 +172,15 @@ is called for an application-consistent daily snapshot.
 cs-sync run --mode zfs --primary tank/data --backup tank2/data --nr 1 \
             --keep hours:24,days:30 --versions y
 
-# LAN: sender on the Primary, receiver on the Backup
-cs-sync zfspull --backup tank2/data --listen :9055 --key <key> --nr 1
+# LAN: sender (master) on the Primary, receiver (slave) on the Backup
+cs-sync zfsreceive --backup tank2/data --listen :9055 --key <key> --nr 1
 cs-sync run --mode zfs --primary tank/data --backup-host 192.168.2.189:9055 --key <key> --nr 1
 ```
 
 | Option | Meaning |
 |---|---|
-| `--primary` / `--backup` | Dataset names (local mode: both, LAN: Primary on sender, Backup on `zfspull`) |
-| `--backup-host` | Address of the `zfspull` receiver (LAN mode) |
+| `--primary` / `--backup` | Dataset names (local mode: both, LAN: Primary on sender, Backup on `zfsreceive`) |
+| `--backup-host` | Address of the `zfsreceive` receiver (LAN mode) |
 | `--nr` | Sync number, part of the snapshot names `sync_<nr>_<fsguid>_<slot>` |
 | `--interval` | Check interval in seconds |
 | `--keep hours:N,days:M` | Retention, applied by each side on its own |

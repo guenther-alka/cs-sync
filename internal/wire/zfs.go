@@ -1,7 +1,7 @@
 package wire
 
 // ZFS replication frames (cs-sync --mode zfs with --backup-host, receiver
-// "cs-sync zfspull"). Added on top of the file-sync frames; the handshake
+// "cs-sync zfsreceive"). Added on top of the file-sync frames; the handshake
 // (TWelcome / TAck) is shared and unchanged. Spec:
 // csweb-gui/data/howto.ai/cs-sync-zfs-realtime.info
 const (

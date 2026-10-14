@@ -1,6 +1,6 @@
 // zfsnet.go -- LAN service pair for --mode zfs: zfssend (Primary side,
-// "run --mode zfs --backup-host host:port") and zfspull (Backup side,
-// "cs-sync zfspull", a listener doing zfs receive). Local single-service
+// "run --mode zfs --backup-host host:port") and zfsreceive (Backup side / slave, old name zfspull,
+// "cs-sync zfsreceive", a listener doing zfs receive). Local single-service
 // case is in zfs.go. The primary never queries snapshots of the backup:
 // it offers its own GUIDs (ZfsHello), the backup answers with a plan.
 package main
@@ -430,8 +430,8 @@ func (rv *zfsRecv) handle(nc net.Conn) {
 	}
 }
 
-func zfspullCmd(args []string) {
-	fs := flag.NewFlagSet("zfspull", flag.ExitOnError)
+func zfsreceiveCmd(args []string) {
+	fs := flag.NewFlagSet("zfsreceive", flag.ExitOnError)
 	backup := fs.String("backup", "", "backup ZFS dataset on this host (required)")
 	listen := fs.String("listen", "127.0.0.1:9010", "listen address")
 	key := fs.String("key", "", "REQUIRED: pre-shared transfer key")
@@ -443,7 +443,7 @@ func zfspullCmd(args []string) {
 	logPath := fs.String("log", "", "log file path")
 	fs.Parse(args)
 	if *backup == "" || *key == "" || *allowIP == "" {
-		fmt.Fprintln(os.Stderr, "error: zfspull needs --backup <dataset>, --key and --allow_ip")
+		fmt.Fprintln(os.Stderr, "error: zfsreceive needs --backup <dataset>, --key and --allow_ip")
 		os.Exit(2)
 	}
 	log, err := logging.New(*logPath)
@@ -460,8 +460,8 @@ func zfspullCmd(args []string) {
 		writeStatus(*serviceID, "error: "+err.Error())
 		os.Exit(1)
 	}
-	log.Printf("cs-sync zfspull %s: backup=%s nr=%s listening on %s (encrypted, allow-ip=%s)", version, *backup, *nr, *listen, *allowIP)
-	writeStatus(*serviceID, fmt.Sprintf("started (%s) zfspull %s", time.Now().Format("2006-01-02 15:04:05"), *backup))
+	log.Printf("cs-sync zfsreceive %s: backup=%s nr=%s listening on %s (encrypted, allow-ip=%s)", version, *backup, *nr, *listen, *allowIP)
+	writeStatus(*serviceID, fmt.Sprintf("started (%s) zfsreceive %s", time.Now().Format("2006-01-02 15:04:05"), *backup))
 	for {
 		nc, err := ln.Accept()
 		if err != nil {

@@ -2,7 +2,7 @@
 // LOCAL single-service case (Primary dataset -> Backup dataset on the
 // same host, zfs send | zfs recv via pipe, no network).
 // Spec: csweb-gui/data/howto.ai/cs-sync-zfs-realtime.info
-// Not yet implemented: LAN service pair (zfssend/zfspull), zfs holds,
+// Not yet implemented: LAN service pair (zfssend/zfsreceive), zfs holds,
 // resume of a half-finished receive from a different base.
 package main
 
@@ -522,7 +522,7 @@ func zfsCmd(args []string) {
 	freeze := fs.String("freeze", "", "hh:mm: once a day take the cycle snapshot via cs-freeze4snap (Proxmox/ESXi), empty=off")
 	freezeBin := fs.String("freeze-bin", "cs-freeze4snap", "path of the cs-freeze4snap binary")
 	freezeArgs := fs.String("freeze-args", "", "extra arguments for cs-freeze4snap snap, space separated (e.g. --policy memkeep=3)")
-	backupHost := fs.String("backup-host", "", "LAN pair: host[:port] of the cs-sync zfspull on the backup member (instead of a local --backup)")
+	backupHost := fs.String("backup-host", "", "LAN pair: host[:port] of the cs-sync zfsreceive on the backup member (instead of a local --backup)")
 	key := fs.String("key", "", "transfer key for --backup-host")
 	serviceID := fs.String("service-id", "", "status file _cfg/sync/<id>.last")
 	logPath := fs.String("log", "", "log file path")

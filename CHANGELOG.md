@@ -3,6 +3,13 @@
 All notable changes to cs-sync are documented here. Versions follow
 `v<major>.<minor>.<patch>`; see the git tags for the full history.
 
+## v3.1.1 (2026-10-14)
+
+### Changed
+
+- The ZFS receiver command `zfspull` is now called `zfsreceive` (receiver / slave mode): nothing is pulled, the sender
+  pushes. `zfspull` still works as an alias, so existing services and the GUI keep running.
+
 ## v3.1.0 (2026-10-13)
 
 ### Fixed (after the live test)
