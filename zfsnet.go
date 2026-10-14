@@ -165,7 +165,7 @@ func (c *zcfg) cycleRemote() (bool, error) {
 		c.destroySnap(pn.full)
 	}
 	pnew := c.primary + "@" + c.prefix + "new"
-	appCons, err := c.takeSnapshot(pnew)
+	cons, err := c.takeSnapshot(pnew)
 	if err != nil {
 		return false, err
 	}
@@ -200,8 +200,8 @@ func (c *zcfg) cycleRemote() (bool, error) {
 	if pn == nil || pn.guid != done.NewGuid {
 		return fail(fmt.Errorf("backup did not confirm snapshot"))
 	}
-	if appCons {
-		zfsRun("set", "cs:consistent=app", pn.full)
+	if cons != "" {
+		zfsRun("set", "cs:consistent="+cons, pn.full)
 	}
 	if len(confs) > 0 {
 		c.applyConfs(c.primary, confs, c.prefix+"new")
@@ -210,7 +210,7 @@ func (c *zcfg) cycleRemote() (bool, error) {
 	if err := c.rotate(c.primary, c.versions); err != nil {
 		return true, err
 	}
-	if err := cn.Send(wire.TZfsRotate, wire.ZfsRotate{App: appCons, Conf: confs}); err != nil {
+	if err := cn.Send(wire.TZfsRotate, wire.ZfsRotate{App: cons == "app", Consistent: cons, Conf: confs}); err != nil {
 		return true, err
 	}
 	_, err = recvDone(cn)
@@ -459,8 +459,12 @@ func (rv *zfsRecv) handle(nc net.Conn) {
 			} else if bl, err := cur.listSnaps(cur.backup); err != nil || findSlot(bl, "new") == nil {
 				d = wire.ZfsDone{Err: "no new snapshot to rotate"}
 			} else {
-				if r.App {
-					zfsRun("set", "cs:consistent=app", findSlot(bl, "new").full)
+				cons := r.Consistent
+				if cons == "" && r.App {
+					cons = "app"
+				}
+				if cons != "" {
+					zfsRun("set", "cs:consistent="+cons, findSlot(bl, "new").full)
 				}
 				if len(r.Conf) > 0 {
 					cur.applyConfs(cur.backup, r.Conf, cur.prefix+"new")

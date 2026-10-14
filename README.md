@@ -187,11 +187,11 @@ cs-sync run --mode zfs --primary tank/data --backup-host 192.168.2.189:9055 --ke
 | `--versions y\|n` | Keep hourly/daily versions (`n`: only the latest two snapshots) |
 | `--rollback ask\|auto` | If the Backup has newer snapshots than the common base: wait for approval in the frontend (`ask`) or roll back (`auto`) |
 | `--recursive` | Replicate child datasets and zvols (`-R`) |
-| `--freeze`, `--freeze-bin`, `--freeze-args` | Application-consistent daily snapshot via `cs-freeze4snap` (falls back to a plain snapshot on failure) |
+| `--freeze`, `--freeze-bin`, `--freeze-args` | Proxmox source: first snapshot of the day automatically via `cs-freeze4snap`, `--freeze hh:mm` only for other sources (ESXi); `--freeze-bin` only if `cs-freeze4snap` is not next to cs-sync, in the tools folder or in PATH; `--freeze-args` = step chain/policy |
 
 How it works:
 
-- Snapshot slots: `new`, `n0`, `n1` (hold 2), `kh<MMDDHH>`, `kd<MMDD>`, `kf<MMDD>` (freeze/app-consistent).
+- Snapshot slots: `new`, `n0`, `n1` (hold 2), `kh<MMDDHH>`, `kd<MMDD>`, `kf<MMDD>` (daily freeze snapshot).
 - The common base is found by GUID; the Primary never queries Backup snapshots, it only receives the Backup's list in the handshake.
 - Crash recovery derives its state from ZFS itself; interrupted transfers are resumed with `send -t <token>`.
 - The wire protocol reuses the encrypted handshake of the file modes (new frames 15-20, `ProtoVersion` unchanged).
@@ -209,7 +209,15 @@ writes the Primary sends back to back (serial, never overlapping, one snapshot p
 after the ZFS transaction group is committed (up to about 5 s). Not covered yet: QEMU guest agent
 `fsfreeze`, ESXi, rollback approval.
 
-### Proxmox: VM/CT configuration
+### Proxmox: VM/CT configuration and daily freeze snapshot
+
+Proxmox has two particularities.
+
+**First**, the VM configuration is not inside the dataset (as with ESXi) but in `/etc/pve`. To restore a VM from its realtime-replicated dataset the VM configuration is needed. When cs-sync finds at start that the source is a Proxmox host, it reads in every cycle the config file of each VM/container whose disk datasets (`vm-<id>-disk-N`, `subvol-<id>-disk-N`) are part of the sync (not the whole `/etc/pve`) and attaches it as ZFS user property `cs:pveconf` to the disk dataset and to every sync snapshot. The properties are transferred to the backup by the cs-sync protocol (not inside the `zfs send` stream); a pure config change is sent without a new `zfs send`.
+
+**Second**, an ordinary snapshot under Proxmox is not consistent in every case but has to be seen like a power failure, harmless to delicate depending on the VM. Therefore, on a Proxmox source the first snapshot of every day automatically goes through `cs-freeze4snap`, which freezes the VMs of the source dataset before the snapshot (guest agent, container freeze; the step chain per VM can be set with `--freeze-args`). `cs-freeze4snap` is looked up in the same folder as cs-sync (standalone setup), else in the napp-it tools folder or in PATH; if it is missing the freeze is skipped (warning in the log) and the snapshot stays crash-consistent. The snapshot is marked `cs:consistent=app` (frozen) or `paused` (VM only paused, crash-consistent) and kept as `kf<MMDD>` on both sides for `--keep days`. On days without data changes no new snapshot is taken. So there is at least one reliably restorable state per day.
+
+Technical details of the config:
 
 A replicated zvol alone is not a restorable VM: hardware, network, boot order and the disk assignment live in
 `/etc/pve/qemu-server/<id>.conf` (containers: `/etc/pve/lxc/<id>.conf`). When cs-sync finds that the Primary is a Proxmox host

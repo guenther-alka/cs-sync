@@ -253,8 +253,8 @@ func (c *zcfg) rotate(ds string, keep bool) error {
 		kd, kh := "kd"+t.Format("0102"), "kh"+t.Format("010215")
 		kf := "kf" + t.Format("0102")
 		switch {
-		case zfsGet("cs:consistent", n1.full) == "app" && findSlot(l, kf) == nil:
-			err = c.rename(ds, "n1", kf) // app-consistent daily snapshot: kept on both sides
+		case frozenVal(zfsGet("cs:consistent", n1.full)) && findSlot(l, kf) == nil:
+			err = c.rename(ds, "n1", kf) // daily snapshot taken via cs-freeze4snap: kept on both sides
 		case keep && findSlot(l, kd) == nil:
 			err = c.rename(ds, "n1", kd)
 		case keep && findSlot(l, kh) == nil:
@@ -362,7 +362,7 @@ func (c *zcfg) cycle() (bool, error) {
 		return false, nil // nothing changed since n0
 	}
 	pnew := c.primary + "@" + c.prefix + "new"
-	appCons, err := c.takeSnapshot(pnew)
+	cons, err := c.takeSnapshot(pnew)
 	if err != nil {
 		return false, err
 	}
@@ -436,9 +436,9 @@ func (c *zcfg) cycle() (bool, error) {
 	if err != nil || pn == nil || findSlot(bl2, "new") == nil || findSlot(bl2, "new").guid != pn.guid {
 		return fail(fmt.Errorf("backup did not confirm snapshot"))
 	}
-	if appCons { // snapshot user properties are not part of a plain send: set on both sides
-		zfsRun("set", "cs:consistent=app", pn.full)
-		zfsRun("set", "cs:consistent=app", findSlot(bl2, "new").full)
+	if cons != "" { // snapshot user properties are not part of a plain send: set on both sides
+		zfsRun("set", "cs:consistent="+cons, pn.full)
+		zfsRun("set", "cs:consistent="+cons, findSlot(bl2, "new").full)
 	}
 	if len(confs) > 0 {
 		c.applyConfs(c.primary, confs, c.prefix+"new")
@@ -469,9 +469,11 @@ func (c *zcfg) freezeDue() bool {
 	return !now.Before(due)
 }
 
-// takeSnapshot creates the cycle snapshot. Once a day (freeze=hh:mm) it
-// goes through cs-freeze4snap (freeze -> snapshot -> thaw); the tool never
-// blocks the snapshot itself. Returns true if the freeze tool took it.
+// takeSnapshot creates the cycle snapshot. Once a day it goes through
+// cs-freeze4snap (freeze -> snapshot -> thaw): on a Proxmox source always
+// (first snapshot of the day), otherwise at --freeze hh:mm. The tool never
+// blocks the snapshot itself. Returns the cs:consistent value: "app"
+// (guest frozen), "paused" (VM paused: crash-consistent) or "" (plain).
 func (c *zcfg) snapshotRec(full string) (string, error) {
 	if c.recursive {
 		return zfsRun("snapshot", "-r", full)
@@ -479,7 +481,7 @@ func (c *zcfg) snapshotRec(full string) (string, error) {
 	return zfsRun("snapshot", full)
 }
 
-func (c *zcfg) takeSnapshot(full string) (bool, error) {
+func (c *zcfg) takeSnapshot(full string) (string, error) {
 	if c.freezeDue() {
 		c.freezeTried = time.Now().Format("20060102")
 		i := strings.Index(full, "@")
@@ -488,13 +490,13 @@ func (c *zcfg) takeSnapshot(full string) (bool, error) {
 		out, err := cmd.CombinedOutput()
 		c.log.Printf("cs-freeze4snap: %s", strings.TrimSpace(string(out)))
 		if err == nil {
-			return true, nil
+			return consistencyOf(out), nil
 		}
 		c.log.Printf("WARN: freeze failed (%v), taking a plain snapshot", err)
 		c.destroySnap(full) // tool may have left a snapshot behind
 	}
 	_, err := c.snapshotRec(full)
-	return false, err
+	return "", err
 }
 
 func parseKeep(s string, hours, days *int) {
@@ -528,8 +530,8 @@ func zfsCmd(args []string) {
 	keep := fs.String("keep", "hours:24,days:30", "retention of kept snapshots, hours:N,days:N")
 	fs.String("hold", "2s", "last N base snapshots (n0,n1) -- fixed at 2s for now")
 	rollback := fs.String("rollback", "ask", "auto|ask: recv -F when the common base is older than the newest backup snapshot")
-	freeze := fs.String("freeze", "", "hh:mm: once a day take the cycle snapshot via cs-freeze4snap (Proxmox/ESXi), empty=off")
-	freezeBin := fs.String("freeze-bin", "cs-freeze4snap", "path of the cs-freeze4snap binary")
+	freeze := fs.String("freeze", "", "hh:mm: daily freeze time for non-Proxmox sources (ESXi); on a Proxmox source the first snapshot of every day is frozen automatically")
+	freezeBin := fs.String("freeze-bin", "", "path of cs-freeze4snap (default: same folder as cs-sync, the napp-it tools folder, or PATH; if missing the freeze is skipped)")
 	freezeArgs := fs.String("freeze-args", "", "extra arguments for cs-freeze4snap snap, space separated (e.g. --policy memkeep=3)")
 	backupHost := fs.String("backup-host", "", "LAN pair: host[:port] of the cs-sync zfsreceive on the backup member (instead of a local --backup)")
 	key := fs.String("key", "", "transfer key for --backup-host")
@@ -563,6 +565,16 @@ func zfsCmd(args []string) {
 	c.freeze, c.freezeBin, c.freezeArgs = *freeze, *freezeBin, strings.Fields(*freezeArgs)
 	c.remoteAddr, c.key, c.recursive = *backupHost, *key, *recursive == "y"
 	c.pveConf = pveAvailable() // fixed behaviour: a Proxmox source always carries the VM/CT config along
+	c.freezeBin = resolveFreezeBin(c.freezeBin)
+	if c.freezeBin == "" {
+		if c.freeze != "" || c.pveConf {
+			log.Printf("WARN: cs-freeze4snap not found (next to cs-sync, in ../../cs-freeze4snap/<os>.<arch>/ or PATH): the daily snapshot is not frozen, only crash-consistent")
+		}
+		c.freeze = ""
+	} else if c.freeze == "" && c.pveConf {
+		c.freeze = "00:00" // Proxmox: the first snapshot of every day goes through cs-freeze4snap
+		log.Printf("Proxmox source: first snapshot of each day is frozen via %s", c.freezeBin)
+	}
 	if c.remoteAddr != "" {
 		c.backup = c.remoteAddr
 	}

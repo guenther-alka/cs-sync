@@ -50,6 +50,7 @@ type ZfsDone struct {
 }
 
 type ZfsRotate struct {
-	App  bool              // snapshot was taken via cs-freeze4snap (cs:consistent=app)
-	Conf map[string]string // relative dataset -> encoded cs:pveconf of this snapshot
+	App        bool              // snapshot was taken via cs-freeze4snap (cs:consistent=app); kept for older senders
+	Consistent string            // cs:consistent value: "app" (frozen) or "paused" (VM paused, crash-consistent)
+	Conf       map[string]string // relative dataset -> encoded cs:pveconf of this snapshot
 }

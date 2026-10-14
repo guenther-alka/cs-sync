@@ -3,6 +3,17 @@
 All notable changes to cs-sync are documented here. Versions follow
 `v<major>.<minor>.<patch>`; see the git tags for the full history.
 
+## v3.3.0 (2026-10-14)
+
+### Changed
+
+- On a Proxmox source the first snapshot of every day automatically goes through `cs-freeze4snap` (no `--freeze` needed;
+  `--freeze hh:mm` remains for other sources such as ESXi). It is kept as `kf<MMDD>` on both sides.
+- `cs-freeze4snap` is found next to cs-sync (standalone), in `../../cs-freeze4snap/<os>.<arch>/` (napp-it tools layout) or in PATH;
+  if it is missing the freeze is skipped with a warning and the snapshot stays crash-consistent.
+- `cs:consistent` is set from the tool result: `app` only if every guest was really frozen (guest agent, container freeze, memory,
+  ESXi quiesce), `paused` if a VM had to be paused (crash-consistent); plain snapshots get no mark.
+
 ## v3.2.1 (2026-10-14)
 
 ### Changed
