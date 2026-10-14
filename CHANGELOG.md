@@ -3,6 +3,18 @@
 All notable changes to cs-sync are documented here. Versions follow
 `v<major>.<minor>.<patch>`; see the git tags for the full history.
 
+## v3.2.0 (2026-10-14)
+
+### Added
+
+- **Proxmox VM/CT config as ZFS property** (`--pve-config auto|y|n`, default auto = on when `/etc/pve` exists): the config of every
+  VM/CT whose disks (`vm-<id>-disk-N`, `subvol-<id>-disk-N`) are synced is stored as `cs:pveconf` (gzip+base64, chunked in
+  `cs:pveconf.N` for the ~8 KB property limit) on the disk datasets and on every sync snapshot, on both sides, independent of the
+  backup OS. A config-only change is sent as a small frame without `zfs send`.
+- `cs-sync pveconf list|show|restore` (`--snapshot`, `--to`, `--map old=new`, `--newid`, `--force`): shows and restores the configs;
+  never writes to `/etc/pve` on its own.
+- Manual (de/en) and README: disaster recovery of a VM step by step (live-tested: OmniOS backup -> Proxmox node, new id, VM started).
+
 ## v3.1.1 (2026-10-14)
 
 ### Changed

@@ -123,7 +123,7 @@ func (c *zcfg) cycleRemote() (bool, error) {
 		return false, err
 	}
 	if findSlot(pl, "n0") != nil && findSlot(pl, "new") == nil && !c.changed() {
-		return false, nil // nothing changed since n0
+		return false, c.confOnlyRemote() // nothing changed since n0 (but the VM config may have)
 	}
 	cn, err := c.dial()
 	if err != nil {
@@ -169,6 +169,7 @@ func (c *zcfg) cycleRemote() (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	confs := c.confsIfOn()
 	fail := func(e error) (bool, error) {
 		c.destroySnap(pnew)
 		return false, e
@@ -202,14 +203,43 @@ func (c *zcfg) cycleRemote() (bool, error) {
 	if appCons {
 		zfsRun("set", "cs:consistent=app", pn.full)
 	}
+	if len(confs) > 0 {
+		c.applyConfs(c.primary, confs, c.prefix+"new")
+		c.confMarkSeen(confs)
+	}
 	if err := c.rotate(c.primary, c.versions); err != nil {
 		return true, err
 	}
-	if err := cn.Send(wire.TZfsRotate, wire.ZfsRotate{App: appCons}); err != nil {
+	if err := cn.Send(wire.TZfsRotate, wire.ZfsRotate{App: appCons, Conf: confs}); err != nil {
 		return true, err
 	}
 	_, err = recvDone(cn)
 	return true, err
+}
+
+// confOnlyRemote: no data to send; if the Proxmox config of a VM/CT changed, only
+// that (small) config goes to the backup.
+func (c *zcfg) confOnlyRemote() error {
+	d := c.confDelta()
+	if len(d) == 0 {
+		return nil
+	}
+	cn, err := c.dial()
+	if err != nil {
+		return err
+	}
+	defer cn.Close()
+	h := wire.ZfsHello{Nr: c.nr, FsGuid: zfsGet("guid", c.primary), Recursive: c.recursive, ConfOnly: true, Conf: d}
+	if err := cn.Send(wire.TZfsHello, h); err != nil {
+		return err
+	}
+	if _, err := recvDone(cn); err != nil {
+		return err
+	}
+	c.applyConfs(c.primary, d, "")
+	c.confMarkSeen(d)
+	c.log.Printf("pve config changed: %d VM/CT updated on backup (no zfs send)", len(d))
+	return nil
 }
 
 // --------------------------------------------------------------- backup
@@ -390,6 +420,19 @@ func (rv *zfsRecv) handle(nc net.Conn) {
 			if wire.Decode(p, &hello) != nil {
 				return
 			}
+			if hello.ConfOnly {
+				d := wire.ZfsDone{OK: true}
+				if hello.Nr != rv.nr {
+					d = wire.ZfsDone{Err: "nr mismatch"}
+				} else if c2 := rv.cfg(hello); !zfsExists(c2.backup) {
+					d = wire.ZfsDone{Err: "backup dataset does not exist yet"}
+				} else {
+					c2.applyConfs(c2.backup, hello.Conf, "")
+					rv.log.Printf("pve config updated: %d VM/CT", len(hello.Conf))
+				}
+				cn.Send(wire.TZfsDone, d)
+				break
+			}
 			var plan wire.ZfsPlan
 			if hello.Nr != rv.nr {
 				plan = wire.ZfsPlan{Kind: "error", Msg: "nr mismatch: primary " + hello.Nr + ", backup service " + rv.nr}
@@ -418,6 +461,9 @@ func (rv *zfsRecv) handle(nc net.Conn) {
 			} else {
 				if r.App {
 					zfsRun("set", "cs:consistent=app", findSlot(bl, "new").full)
+				}
+				if len(r.Conf) > 0 {
+					cur.applyConfs(cur.backup, r.Conf, cur.prefix+"new")
 				}
 				if err := cur.rotate(cur.backup, true); err != nil {
 					d = wire.ZfsDone{Err: err.Error()}

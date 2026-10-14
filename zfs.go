@@ -36,10 +36,12 @@ type zcfg struct {
 	log                         *logging.Logger
 	freeze, freezeBin           string // freeze=hh:mm (daily app-consistent snapshot), tool path
 	freezeArgs                  []string
-	freezeTried                 string // YYYYMMDD of the last freeze attempt
-	lastFull                    bool   // last cycle was an initial full send (no adaptive wait afterwards)
-	recursive                   bool   // replicate child datasets too (send -R)
-	remoteAddr, key             string // LAN pair: backup host:port + transfer key ("" = local backup)
+	freezeTried                 string            // YYYYMMDD of the last freeze attempt
+	lastFull                    bool              // last cycle was an initial full send (no adaptive wait afterwards)
+	recursive                   bool              // replicate child datasets too (send -R)
+	pveConf                     bool              // store Proxmox VM/CT configs as cs:pveconf properties
+	confSeen                    map[string]string // last stored/sent config per relative dataset
+	remoteAddr, key             string            // LAN pair: backup host:port + transfer key ("" = local backup)
 }
 
 func (c *zcfg) sendArgs(a ...string) []string {
@@ -356,6 +358,7 @@ func (c *zcfg) cycle() (bool, error) {
 		return false, err
 	}
 	if n0 := findSlot(pl, "n0"); n0 != nil && !c.changed() {
+		c.confOnlyLocal()
 		return false, nil // nothing changed since n0
 	}
 	pnew := c.primary + "@" + c.prefix + "new"
@@ -363,6 +366,7 @@ func (c *zcfg) cycle() (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	confs := c.confsIfOn()
 	fail := func(e error) (bool, error) {
 		c.destroySnap(pnew)
 		return false, e
@@ -435,6 +439,11 @@ func (c *zcfg) cycle() (bool, error) {
 	if appCons { // snapshot user properties are not part of a plain send: set on both sides
 		zfsRun("set", "cs:consistent=app", pn.full)
 		zfsRun("set", "cs:consistent=app", findSlot(bl2, "new").full)
+	}
+	if len(confs) > 0 {
+		c.applyConfs(c.primary, confs, c.prefix+"new")
+		c.applyConfs(c.backup, confs, c.prefix+"new")
+		c.confMarkSeen(confs)
 	}
 	if err := c.rotate(c.primary, c.versions); err != nil {
 		return true, err
@@ -522,6 +531,7 @@ func zfsCmd(args []string) {
 	freeze := fs.String("freeze", "", "hh:mm: once a day take the cycle snapshot via cs-freeze4snap (Proxmox/ESXi), empty=off")
 	freezeBin := fs.String("freeze-bin", "cs-freeze4snap", "path of the cs-freeze4snap binary")
 	freezeArgs := fs.String("freeze-args", "", "extra arguments for cs-freeze4snap snap, space separated (e.g. --policy memkeep=3)")
+	pveConfOpt := fs.String("pve-config", "auto", "auto|y|n: store the Proxmox VM/CT config (/etc/pve) of the synced disks as cs:pveconf properties on both sides (auto = on when /etc/pve exists)")
 	backupHost := fs.String("backup-host", "", "LAN pair: host[:port] of the cs-sync zfsreceive on the backup member (instead of a local --backup)")
 	key := fs.String("key", "", "transfer key for --backup-host")
 	serviceID := fs.String("service-id", "", "status file _cfg/sync/<id>.last")
@@ -553,6 +563,7 @@ func zfsCmd(args []string) {
 	parseKeep(*keep, &c.keepHours, &c.keepDays)
 	c.freeze, c.freezeBin, c.freezeArgs = *freeze, *freezeBin, strings.Fields(*freezeArgs)
 	c.remoteAddr, c.key, c.recursive = *backupHost, *key, *recursive == "y"
+	c.pveConf = *pveConfOpt == "y" || (*pveConfOpt == "auto" && pveAvailable())
 	if c.remoteAddr != "" {
 		c.backup = c.remoteAddr
 	}

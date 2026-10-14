@@ -25,7 +25,9 @@ type ZfsHello struct {
 	Nr        string
 	FsGuid    string // GUID of the primary dataset
 	Snaps     []ZfsSnapRef
-	Recursive bool // replicate child datasets (zfs send -R)
+	Recursive bool              // replicate child datasets (zfs send -R)
+	ConfOnly  bool              // only the Proxmox VM/CT config changed: no plan/stream, just apply Conf (answer: TZfsDone)
+	Conf      map[string]string // relative dataset -> encoded cs:pveconf
 }
 
 // ZfsPlan is the backup's answer.
@@ -48,5 +50,6 @@ type ZfsDone struct {
 }
 
 type ZfsRotate struct {
-	App bool // snapshot was taken via cs-freeze4snap (cs:consistent=app)
+	App  bool              // snapshot was taken via cs-freeze4snap (cs:consistent=app)
+	Conf map[string]string // relative dataset -> encoded cs:pveconf of this snapshot
 }

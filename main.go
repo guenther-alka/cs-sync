@@ -56,6 +56,8 @@ func main() {
 		serveCmd(os.Args[2:])
 	case "zfsreceive", "zfspull": // zfspull = old name, kept as alias
 		zfsreceiveCmd(os.Args[2:])
+	case "pveconf":
+		pveconfCmd(os.Args[2:])
 	case "scan":
 		runCmd(os.Args[2:], false)
 	case "webhook-test":
@@ -74,6 +76,7 @@ Usage:
   cs-sync scan --mode sync --primary <endpoint> --secondary <endpoint>  (dry-run report)
   cs-sync serve --dest <path> --listen 127.0.0.1:9010 --key <k> --allow_ip <ip>
   cs-sync run --mode zfs --primary <dataset> (--backup <dataset> | --backup-host host[:port] --key <k>) --nr N  (ZFS replication)
+  cs-sync pveconf list|show|restore --dataset <ds> [--snapshot n0] [--to /etc/pve/qemu-server] [--map a=b]   (Proxmox VM/CT config stored by --pve-config)
   cs-sync zfsreceive --backup <dataset> --listen <addr> --key <k> --allow_ip <ip> --nr N     (ZFS replication receiver / slave; old name: zfspull)
   cs-sync webhook-test --listen <addr> [--token <t>] [--allow_ip <ip>]
   cs-sync version

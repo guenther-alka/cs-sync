@@ -187,6 +187,7 @@ cs-sync run --mode zfs --primary tank/data --backup-host 192.168.2.189:9055 --ke
 | `--versions y\|n` | Keep hourly/daily versions (`n`: only the latest two snapshots) |
 | `--rollback ask\|auto` | If the Backup has newer snapshots than the common base: wait for approval in the frontend (`ask`) or roll back (`auto`) |
 | `--recursive` | Replicate child datasets and zvols (`-R`) |
+| `--pve-config auto\|y\|n` | Store the Proxmox VM/CT config as `cs:pveconf` properties on both sides (default `auto`: on when `/etc/pve` exists) |
 | `--freeze`, `--freeze-bin`, `--freeze-args` | Application-consistent daily snapshot via `cs-freeze4snap` (falls back to a plain snapshot on failure) |
 
 How it works:
@@ -209,6 +210,79 @@ writes the Primary sends back to back (serial, never overlapping, one snapshot p
 after the ZFS transaction group is committed (up to about 5 s). Not covered yet: QEMU guest agent
 `fsfreeze`, ESXi, rollback approval.
 
+### Proxmox: VM/CT configuration (`--pve-config`)
+
+A replicated zvol alone is not a restorable VM: hardware, network, boot order and the disk assignment live in
+`/etc/pve/qemu-server/<id>.conf` (containers: `/etc/pve/lxc/<id>.conf`). With `--pve-config` (default `auto`: on when
+`/etc/pve` exists, `y` forces it, `n` switches it off) the sender reads the config of every VM/CT whose disk datasets
+(`vm-<id>-disk-N`, `subvol-<id>-disk-N`, `base-<id>-disk-N`) are part of the sync and stores it as ZFS user property
+`cs:pveconf` (gzip + base64, continued in `cs:pveconf.1`, `.2` ... because one property value is limited to about 8 KB):
+
+- on the disk dataset itself: the **current** config, on both sides. If only the config changes (RAM, NIC, new disk), only
+  this small property is sent, no `zfs send`.
+- on every sync snapshot (`n0`, `n1`, `kh..`, `kd..`, `kf..`): the config **at the time of that snapshot**, so every disk state has
+  its matching config.
+
+The backup side can be any OS (OmniOS, FreeBSD, Linux); the properties are read with `zfs get` and by `cs-sync pveconf`.
+Only the config of the VM belonging to the disk goes with that disk, never the whole `/etc/pve` (storage.cfg, users,
+firewall and cluster files are host settings and not part of the replication). The id travels inside the value, so the
+backup dataset may have any name.
+
+| Command | Meaning |
+|---|---|
+| `cs-sync pveconf list --dataset <ds>` | all VM/CT configs below the dataset (id, type, size) and the snapshots that carry one |
+| `cs-sync pveconf show --dataset <disk-ds> [--snapshot n0\|kf1013\|<name>]` | print the config (current or of a snapshot) |
+| `cs-sync pveconf restore --dataset <disk-ds> [--snapshot ..] --to <dir> [--map old=new] [--newid N] [--force]` | write `<id>.conf` into `<dir>`; `--map nvme=local-zfs` renames the storage; `--newid 905` also renames the disks `vm-105-disk-N` to `vm-905-disk-N`; without `--force` an existing file is never overwritten |
+
+`--recursive y` with a parent dataset handles all disks below it. cs-sync never writes into `/etc/pve` on its own; the
+restore always targets a directory you name.
+
+### Disaster recovery of a VM (step by step)
+
+This procedure was run live: backup on OmniOS (no Proxmox), VM data sent back to a Proxmox node, config restored
+with a new id, VM started and the guest agent answered. Names in angle brackets are placeholders.
+
+**Starting point.** The primary is gone or damaged. `<B>` is the backup dataset (for example `tank/dr/vm-105-disk-0`) with the
+snapshots `sync_<nr>_<guid>_n0 / n1 / kh<MMDDHH> / kd<MMDD> / kf<MMDD>`. `<T>` is the Proxmox node on which the VM
+should run again, `<S>` its ZFS storage (see `/etc/pve/storage.cfg`), `<P>` the pool behind `<S>`.
+
+1. **Freeze the backup.** Stop the receiver service of this VM on the backup host (Services > Realtime Sync) so no new
+   snapshot is rotated during recovery. On the backup dataset never run `zfs rollback`, `zfs destroy` of `sync_` snapshots or
+   `zfs set readonly=off`; recovery always works on a copy.
+2. **Find the VM.** `cs-sync pveconf list --dataset <B-or-parent>` shows `id=<id>`, type (`qemu` or `lxc`) and the snapshots with a config.
+   No output ("no cs:pveconf found"): the source had no `/etc/pve` or `--pve-config n`; then the data can still be
+   restored (step 4), but the config must be rebuilt by hand.
+3. **Choose the snapshot.** `zfs list -t snapshot -d 1 -o name,creation,cs:consistent <B>`. `kf<MMDD>` with `cs:consistent=app`
+   is the application-consistent daily snapshot (guest agent freeze); `n0` is the newest state (crash-consistent, like after a
+   power loss). Without a reason take `n0`; if the guest does not start cleanly, retry with `kf`.
+4. **Bring the data to `<T>`** as a dataset named exactly like in the config (`vm-<id>-disk-N`, or the new id):
+   - backup pool is on `<T>` itself: `zfs send <B>@<snap> | zfs recv -u <P>/vm-<id>-disk-0`
+   - other host with ssh: `zfs send <B>@<snap> | ssh <T> zfs recv -u <P>/vm-<id>-disk-0`
+   - no ssh between the hosts: use cs-sync backwards. On `<T>`: `cs-sync zfsreceive --backup <P>/vm-<id>-disk-0 --listen :9070 --key <k> --allow_ip <backup-host> --nr 9`;
+     on the backup host: `cs-sync run --mode zfs --primary <B> --backup-host <T>:9070 --key <k> --nr 9`. When the log shows `ok`, stop both.
+   Repeat for every disk of the VM (the config lists them: `scsi0`, `virtio0`, `efidisk0`, `tpmstate0`, `rootfs`).
+   Then on `<T>`: `zfs set readonly=off <P>/vm-<id>-disk-N` and, after the cs-sync way, `zfs inherit cs:sync <P>/vm-<id>-disk-N`.
+5. **Restore the config** on the host that holds the properties (the backup host):
+   `cs-sync pveconf restore --dataset <B> --snapshot <slot> --to /root/restore --map <old-storage>=<S> [--newid <N>]`
+   (containers: the same, the file goes to `/etc/pve/lxc`). Use `--newid` when the old id still exists on `<T>` or in the cluster.
+   Copy the file to `<T>`: `/etc/pve/qemu-server/<id>.conf`. If `<id>.conf` already exists the command refuses (no `--force` unless the
+   existing VM is really meant to be replaced).
+6. **Adapt the config.** `ide2: ...:vm-<id>-cloudinit` is not replicated (separate dataset): remove it with `qm set <id> --delete ide2` or recreate it with
+   `qm set <id> --ide2 <S>:cloudinit`. If the original VM may still run or the id was changed: new MAC (`qm set <id> --net0 virtio=<new-mac>,bridge=vmbr0`) and
+   first `link_down=1` to avoid duplicate IPs. Disks that lived on other storages than the synced dataset are not in the backup and must be recovered separately.
+7. **Check before starting.** `qm config <id>` must print without error; `pvesm path <S>:vm-<id>-disk-0` must give a device; `qm status <id>` says `stopped`.
+8. **Start and verify.** `qm start <id>`, then `qm agent <id> ping` (answers when the guest agent runs) and `qm guest exec <id> -- uptime`. Check application data.
+   A crash-consistent snapshot triggers fsck / journal replay on the first boot.
+9. **Back to normal operation.** Remove `link_down`, put the VM under a new sync (new primary -> new backup, new `--nr`, initial full send). Delete the old backup
+   dataset only after the new sync has completed.
+
+Containers: steps 1 to 5 as above (`--to /etc/pve/lxc`, dataset `subvol-<id>-disk-0`), verification with `pct config <id>` and `pct start <id>`;
+the subvol datasets must have the same `mountpoint`/`canmount` as a healthy subvol on `<T>` (compare with `zfs get canmount,mountpoint`). The container path was
+tested for the config (properties and restore) but not for a complete restart.
+
+**Rules for automation (AI or script):** never delete or roll back anything on the backup; every step has a check (output of
+`list`, `zfs list`, `qm config`); stop on the first error and report it; never use `--force` for an id that is in use; never start a restored copy with the
+network up while the original may still run.
 ## Install — pre-built binaries
 
 Prebuilt binaries for every platform are attached to each
